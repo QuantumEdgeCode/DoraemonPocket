@@ -154,23 +154,11 @@ index = 1
 while os.path.exists(f"{tar_filename[:-7]}_{index:02d}.tar.xz"):
     index += 1
 
-new_tar_filename = f"{data_directory}_{index:02d}.tar.xz"
-shutil.make_archive(new_tar_filename[:-7], 'xztar', data_directory)
+shutil.make_archive(f"{data_directory}_{index:02d}", 'xztar', data_directory)
 
-# 打印日志和消息,打印打包后的tar.xz文件
-logging.info(f"目录 {data_directory} 已打包为 {new_tar_filename}")
-print(f"目录 {data_directory} 已打包为 {new_tar_filename}")
-
-# # 使用序号重命名，不覆盖已存在的文件
-# index = 1
-# while os.path.exists(f"{tar_filename[:-7]}_{index:02d}.tar.xz"):
-#     index += 1
-#
-# shutil.make_archive(f"{data_directory}_{index:02d}", 'xztar', data_directory)
-#
-# # 打印日志和消息
-# logging.info(f"目录 {data_directory} 已打包为 {tar_filename}")
-# print(f"目录 {data_directory} 已打包为 {tar_filename}")
+# 打印日志和消息
+logging.info(f"目录 {data_directory} 已打包为 {tar_filename}")
+print(f"目录 {data_directory} 已打包为 {tar_filename}")
 
 
 # # 打包目录为tar.xz文件
