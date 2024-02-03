@@ -1,0 +1,103 @@
+<!DOCTYPE HTML>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>股票历史K线</title>
+    <!-- 引入CanvasJS库 -->
+    <script src="https://canvasjs.com/assets/script/canvasjs.min.js"></script>
+</head>
+<body>
+    <div id="chartContainer" style="height: 300px; max-width: 920px; margin: 0px auto;"></div>
+
+    <script>
+        // CSV文件路径
+        const csvFilePath = '{filename}.csv';
+
+        // 使用Fetch API加载CSV文件
+        fetch(csvFilePath)
+            .then(response => response.text())
+            .then(csvData => processData(csvData))
+            .catch(error => console.error('Error loading CSV file:', error));
+
+        function processData(csvData) {
+            // 将CSV数据解析为数组
+            const rows = csvData.split('\n').map(row => row.split(','));
+
+            // 初始化CanvasJS数据数组
+            const stockDataPoints = [];
+
+            // 遍历CSV数据并添加到CanvasJS数据数组
+            for (let i = 1; i < rows.length; i++) {
+                const date = new Date(rows[i][2]);
+                const open = parseFloat(rows[i][3]);
+                const close = parseFloat(rows[i][4]);
+                const high = parseFloat(rows[i][5]);
+                const low = parseFloat(rows[i][6]);
+                const volume = parseInt(rows[i][7]);
+                const turnover = parseFloat(rows[i][8]);
+                const amplitude = parseFloat(rows[i][9]);
+                const changePercent = parseFloat(rows[i][10]);
+                const changeAmount = parseFloat(rows[i][11]);
+                const turnoverRate = parseFloat(rows[i][12]);
+
+                stockDataPoints.push({
+                    x: date,
+                    y: [open, close, high, low],
+                    name: `日期: ${date.toDateString()}`,
+                    volume,
+                    turnover,
+                    amplitude,
+                    changePercent,
+                    changeAmount,
+                    turnoverRate
+                });
+            }
+
+            // 创建CanvasJS图表
+            const chart = new CanvasJS.Chart("chartContainer", {
+                zoomEnabled: true,
+                animationEnabled: true,
+                title: {
+                    text: "{股票代码} {股票名称}"
+                },
+                axisX: {
+                    title: "日期"
+                },
+                axisY: {
+                    title: "价格"
+                },
+                toolTip: {
+                    shared: true,
+                    content: generateToolTipContent
+                },
+                data: [{
+                    type: "candlestick",
+                    dataPoints: stockDataPoints,
+                    showInLegend: true,
+                    legendText: "股票数据"
+                }]
+            });
+
+            // 渲染图表
+            chart.render();
+        }
+
+        function generateToolTipContent(e) {
+            let content = `<strong>${e.entries[0].dataPoint.name}</strong><br/>`;
+            content += `开盘: ${e.entries[0].dataPoint.y[0]}<br/>`;
+            content += `收盘: ${e.entries[0].dataPoint.y[1]}<br/>`;
+            content += `最高: ${e.entries[0].dataPoint.y[2]}<br/>`;
+            content += `最低: ${e.entries[0].dataPoint.y[3]}<br/>`;
+            content += `成交量: ${e.entries[0].dataPoint.volume}<br/>`;
+            content += `成交额: ${e.entries[0].dataPoint.turnover}<br/>`;
+            content += `振幅: ${e.entries[0].dataPoint.amplitude}<br/>`;
+            content += `涨跌幅: ${e.entries[0].dataPoint.changePercent}%<br/>`;
+            content += `涨跌额: ${e.entries[0].dataPoint.changeAmount}<br/>`;
+            content += `换手率: ${e.entries[0].dataPoint.turnoverRate}%<br/>`;
+
+            return content;
+        }
+    </script>
+</body>
+</html>
