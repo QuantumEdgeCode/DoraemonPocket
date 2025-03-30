@@ -1,0 +1,8 @@
+{
+    "smtp_server": "smtp..com",
+    "smtp_port": 25,
+    "sender_email": "发件人",
+    "sender_password": "密码或授权码",
+    "sender_name": "发件人昵称",
+    "recipient_email": "收件人"
+}
