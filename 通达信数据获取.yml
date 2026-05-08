@@ -1,0 +1,177 @@
+name: Download TDX Data Weekly
+
+on:
+  schedule:
+    # 每周五北京时间 22:00 (UTC+8) = UTC 14:00
+    - cron: '0 14 * * 5'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Create data directory
+        run: mkdir -p tdx_data
+      
+      - name: Download TDX data files
+        run: |
+          cd tdx_data
+          
+          # 定义所有下载链接
+          urls=(
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/bjlday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/tdxzs_day.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shzsday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szzsday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday_4.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday_4.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shqqday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szqqday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/xsbday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/62day.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/ggtday.zip"
+          )
+          
+          # 下载所有文件
+          for url in "${urls[@]}"; do
+            filename=$(basename "$url")
+            echo "Downloading $filename..."
+            wget --timeout=30 --tries=3 -q "$url" -O "$filename" && echo "✓ $filename downloaded" || echo "✗ Failed to download $filename"
+          done
+      
+      - name: Calculate SHA256 checksums
+        id: checksums
+        run: |
+          echo "Calculating SHA256 checksums for downloaded files..."
+          echo ""
+          
+          # 创建校验文件
+          cd tdx_data
+          
+          # 计算每个文件的 SHA256
+          echo "# SHA256 校验值" > SHA256SUMS.txt
+          echo "# 生成时间: $(date '+%Y-%m-%d %H:%M:%S' --date='TZ="Asia/Shanghai"') 北京时间" >> SHA256SUMS.txt
+          echo "# 说明: 用于验证下载文件的完整性和真实性" >> SHA256SUMS.txt
+          echo "" >> SHA256SUMS.txt
+          
+          for file in *.zip; do
+            if [ -f "$file" ]; then
+              sha256=$(sha256sum "$file" | awk '{print $1}')
+              size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+              size_mb=$(echo "scale=2; $size / 1048576" | bc)
+              echo "$sha256  $file" >> SHA256SUMS.txt
+              echo "✓ $file: $sha256 (${size_mb}MB)"
+            fi
+          done
+          
+          # 生成 JSON 格式校验文件（便于程序化处理）
+          echo "{" > checksums.json
+          echo "  \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> checksums.json
+          echo "  \"generated_at_beijing\": \"$(date '+%Y-%m-%d %H:%M:%S' --date='TZ="Asia/Shanghai"')\"," >> checksums.json
+          echo "  \"files\": {" >> checksums.json
+          
+          first=true
+          for file in *.zip; do
+            if [ -f "$file" ]; then
+              sha256=$(sha256sum "$file" | awk '{print $1}')
+              size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+              
+              if [ "$first" = true ]; then
+                first=false
+              else
+                echo "    ," >> checksums.json
+              fi
+              
+              echo -n "    \"$file\": {\"sha256\": \"$sha256\", \"size\": $size}" >> checksums.json
+            fi
+          done
+          
+          echo "" >> checksums.json
+          echo "  }" >> checksums.json
+          echo "}" >> checksums.json
+          
+          echo ""
+          echo "SHA256 checksums saved to SHA256SUMS.txt and checksums.json"
+      
+      - name: List downloaded files with checksums
+        run: |
+          echo "=== Downloaded Files with SHA256 ==="
+          cat tdx_data/SHA256SUMS.txt
+          echo ""
+          echo "=== File Sizes ==="
+          ls -lh tdx_data/*.zip
+      
+      - name: Create info file
+        run: |
+          cat > tdx_data/通达信数据获取.txt << 'EOF'
+          通达信数据下载说明
+          ===================
+          
+          下载时间：$(date '+%Y-%m-%d %H:%M:%S' --date='TZ="Asia/Shanghai"')
+          
+          数据文件列表及 SHA256 校验值：
+          EOF
+          
+          # 追加校验信息到说明文件
+          cat tdx_data/SHA256SUMS.txt >> tdx_data/通达信数据获取.txt
+          
+          cat >> tdx_data/通达信数据获取.txt << 'EOF'
+          
+          使用说明：
+          =========
+          1. 下载所需的数据文件
+          2. 使用 SHA256SUMS.txt 验证文件完整性
+          3. Linux/Mac 验证命令：sha256sum -c SHA256SUMS.txt
+          4. Windows 验证工具：CertUtil -hashfile 文件名 SHA256
+          5. 解压后导入通达信软件
+          
+          数据来源：通达信官网 (www.tdx.com.cn)
+          校验文件：SHA256SUMS.txt（文本格式）和 checksums.json（JSON格式）
+          EOF
+      
+      - name: Create release archive
+        run: |
+          cd tdx_data
+          zip -r ../tdx_data_$(date +%Y%m%d).zip .
+      
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+      
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.date.outputs.date }}
+          name: 通达信数据 - ${{ steps.date.outputs.date }}
+          body: |
+            ## 📊 通达信数据下载
+            
+            **下载时间**: ${{ steps.date.outputs.date }} (北京时间周五)
+            
+            ### 📁 包含以下数据文件：
+            - 沪市日线、深市日线、北交所日线
+            - 指数数据（通达信、沪市、深市）
+            - 4位代码版本、全权数据
+            - 新三板、港股通等数据
+            
+            ### 🔐 SHA256 校验
+            
+            **所有文件已计算 SHA256 校验值，确保数据完整性！**
+            
+            验证方法：
+            ```bash
+            # Linux/Mac
+            sha256sum -c SHA256SUMS.txt
+            
+            # Windows PowerShell
+            Get-FileHash -Algorithm SHA256 文件名.zip
+            
+            # Windows CMD
+            CertUtil -hashfile 文件名.zip SHA256
