@@ -1,4 +1,4 @@
-name: Download TDX Data Weekly
+name: 下载通达信数据（每周五）
 
 on:
   schedule:
@@ -11,13 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: 记录开始时间
+        id: start_time
+        run: |
+          echo "start=$(date -u +%s)" >> $GITHUB_OUTPUT
+          echo "start_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          echo "开始执行时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间"
+      
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Create data directory
+      - name: 创建数据目录
         run: mkdir -p tdx_data
       
-      - name: Download TDX data files
+      - name: 下载通达信数据文件
         run: |
           cd tdx_data
           
@@ -41,54 +48,48 @@ jobs:
           # 下载所有文件
           for url in "${urls[@]}"; do
             filename=$(basename "$url")
-            echo "Downloading $filename..."
-            wget --timeout=30 --tries=3 -q "$url" -O "$filename" && echo "✓ $filename downloaded" || echo "✗ Failed to download $filename"
+            echo "正在下载: $filename..."
+            wget --timeout=30 --tries=3 -q "$url" -O "$filename" && echo "✓ $filename 下载成功" || echo "✗ $filename 下载失败"
           done
       
-      - name: Calculate SHA256 checksums
-        id: checksums
+      - name: 计算 SHA256 校验值
         run: |
-          echo "Calculating SHA256 checksums for downloaded files..."
+          echo "正在计算 SHA256 校验值..."
           echo ""
           
-          # 创建校验文件
           cd tdx_data
           
-          # 计算每个文件的 SHA256
+          # 创建文本格式校验文件
           echo "# SHA256 校验值" > SHA256SUMS.txt
-          echo "# 生成时间: $(date '+%Y-%m-%d %H:%M:%S' --date='TZ="Asia/Shanghai"') 北京时间" >> SHA256SUMS.txt
-          echo "# 说明: 用于验证下载文件的完整性和真实性" >> SHA256SUMS.txt
+          echo "# 生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间" >> SHA256SUMS.txt
+          echo "# 验证命令: sha256sum -c SHA256SUMS.txt" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
           
-          for file in *.zip; do
-            if [ -f "$file" ]; then
-              sha256=$(sha256sum "$file" | awk '{print $1}')
-              size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
-              size_mb=$(echo "scale=2; $size / 1048576" | bc)
-              echo "$sha256  $file" >> SHA256SUMS.txt
-              echo "✓ $file: $sha256 (${size_mb}MB)"
-            fi
-          done
-          
-          # 生成 JSON 格式校验文件（便于程序化处理）
+          # 创建 JSON 格式校验文件
           echo "{" > checksums.json
           echo "  \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> checksums.json
-          echo "  \"generated_at_beijing\": \"$(date '+%Y-%m-%d %H:%M:%S' --date='TZ="Asia/Shanghai"')\"," >> checksums.json
+          echo "  \"generated_at_beijing\": \"$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')\"," >> checksums.json
           echo "  \"files\": {" >> checksums.json
           
           first=true
           for file in *.zip; do
             if [ -f "$file" ]; then
               sha256=$(sha256sum "$file" | awk '{print $1}')
-              size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+              size=$(stat -c%s "$file")
+              size_kb=$((size / 1024))
               
+              # 写入文本格式
+              echo "$sha256  $file" >> SHA256SUMS.txt
+              
+              # 写入 JSON 格式
               if [ "$first" = true ]; then
                 first=false
               else
                 echo "    ," >> checksums.json
               fi
+              echo -n "    \"$file\": {\"sha256\": \"$sha256\", \"size\": $size, \"size_kb\": $size_kb}" >> checksums.json
               
-              echo -n "    \"$file\": {\"sha256\": \"$sha256\", \"size\": $size}" >> checksums.json
+              echo "✓ $file: $sha256 (${size_kb}KB)"
             fi
           done
           
@@ -97,55 +98,31 @@ jobs:
           echo "}" >> checksums.json
           
           echo ""
-          echo "SHA256 checksums saved to SHA256SUMS.txt and checksums.json"
+          echo "SHA256 校验值计算完成！"
       
-      - name: List downloaded files with checksums
+      - name: 计算运行时间
+        id: run_time
         run: |
-          echo "=== Downloaded Files with SHA256 ==="
-          cat tdx_data/SHA256SUMS.txt
-          echo ""
-          echo "=== File Sizes ==="
-          ls -lh tdx_data/*.zip
+          end=$(date -u +%s)
+          start=${{ steps.start_time.outputs.start }}
+          duration=$((end - start))
+          minutes=$((duration / 60))
+          seconds=$((duration % 60))
+          
+          echo "end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          echo "duration=${minutes}分${seconds}秒" >> $GITHUB_OUTPUT
+          echo "duration_seconds=${duration}" >> $GITHUB_OUTPUT
+          
+          echo "结束时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间"
+          echo "总运行时间: ${minutes} 分 ${seconds} 秒"
       
-      - name: Create info file
-        run: |
-          cat > tdx_data/通达信数据获取.txt << 'EOF'
-          通达信数据下载说明
-          ===================
-          
-          下载时间：$(date '+%Y-%m-%d %H:%M:%S' --date='TZ="Asia/Shanghai"')
-          
-          数据文件列表及 SHA256 校验值：
-          EOF
-          
-          # 追加校验信息到说明文件
-          cat tdx_data/SHA256SUMS.txt >> tdx_data/通达信数据获取.txt
-          
-          cat >> tdx_data/通达信数据获取.txt << 'EOF'
-          
-          使用说明：
-          =========
-          1. 下载所需的数据文件
-          2. 使用 SHA256SUMS.txt 验证文件完整性
-          3. Linux/Mac 验证命令：sha256sum -c SHA256SUMS.txt
-          4. Windows 验证工具：CertUtil -hashfile 文件名 SHA256
-          5. 解压后导入通达信软件
-          
-          数据来源：通达信官网 (www.tdx.com.cn)
-          校验文件：SHA256SUMS.txt（文本格式）和 checksums.json（JSON格式）
-          EOF
-      
-      - name: Create release archive
-        run: |
-          cd tdx_data
-          zip -r ../tdx_data_$(date +%Y%m%d).zip .
-      
-      - name: Get current date
+      - name: 获取当前日期
         id: date
-        run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+        run: |
+          echo "date=$(TZ='Asia/Shanghai' date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          echo "datetime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
       
-      - name: Create Release
-        id: create_release
+      - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.date.outputs.date }}
@@ -153,25 +130,41 @@ jobs:
           body: |
             ## 📊 通达信数据下载
             
-            **下载时间**: ${{ steps.date.outputs.date }} (北京时间周五)
+            ### ⏱️ 执行信息
+            | 项目 | 时间 |
+            |------|------|
+            | **开始时间** | ${{ steps.start_time.outputs.start_time }} (北京时间) |
+            | **结束时间** | ${{ steps.run_time.outputs.end_time }} (北京时间) |
+            | **运行耗时** | ${{ steps.run_time.outputs.duration }} |
             
-            ### 📁 包含以下数据文件：
-            - 沪市日线、深市日线、北交所日线
-            - 指数数据（通达信、沪市、深市）
-            - 4位代码版本、全权数据
-            - 新三板、港股通等数据
+            **下载时间**: ${{ steps.date.outputs.datetime }} (北京时间周五)
+            
+            ### 📁 数据文件列表
+            
+            | 文件名 | 说明 | 大小 |
+            |--------|------|------|
+            | `shlday.zip` | 沪市日线数据 | - |
+            | `szlday.zip` | 深市日线数据 | - |
+            | `bjlday.zip` | 北交所日线数据 | - |
+            | `tdxzs_day.zip` | 通达信指数日线 | - |
+            | `shzsday.zip` | 沪市指数日线 | - |
+            | `szzsday.zip` | 深市指数日线 | - |
+            | `shlday_4.zip` | 沪市日线(4位代码) | - |
+            | `szlday_4.zip` | 深市日线(4位代码) | - |
+            | `shqqday.zip` | 沪市全权日线 | - |
+            | `szqqday.zip` | 深市全权日线 | - |
+            | `xsbday.zip` | 新三板日线 | - |
+            | `62day.zip` | 62板块日线 | - |
+            | `ggtday.zip` | 港股通日线 | - |
             
             ### 🔐 SHA256 校验
             
-            **所有文件已计算 SHA256 校验值，确保数据完整性！**
+            下载后请验证文件完整性：
             
-            验证方法：
+            **Linux/Mac:**
             ```bash
-            # Linux/Mac
+            # 下载校验文件
+            wget $(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/v${{ steps.date.outputs.date }} | grep "browser_download_url.*SHA256SUMS.txt" | cut -d '"' -f 4)
+            
+            # 验证所有文件
             sha256sum -c SHA256SUMS.txt
-            
-            # Windows PowerShell
-            Get-FileHash -Algorithm SHA256 文件名.zip
-            
-            # Windows CMD
-            CertUtil -hashfile 文件名.zip SHA256
