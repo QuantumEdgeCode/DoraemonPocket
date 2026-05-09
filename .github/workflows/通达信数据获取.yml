@@ -243,7 +243,7 @@ jobs:
       # 步骤8：创建GitHub Release并上传文件
       # 使用softprops/action-gh-release动作
       # 将所有下载的数据文件和校验文件上传到Release
-      # 这是核心步骤，必须成功
+      # 【核心】files 字段必须明确列出所有文件！
       # ----------------------------------------------------------
       - name: 创建 Release 并上传数据文件
         id: create_release
