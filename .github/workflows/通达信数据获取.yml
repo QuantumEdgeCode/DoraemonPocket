@@ -13,6 +13,7 @@ permissions:
 jobs:
   download-and-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 120  # 关键修改：设置作业超时为2小时，防止死循环或长时间卡住
     
     steps:
       - name: 记录开始时间
