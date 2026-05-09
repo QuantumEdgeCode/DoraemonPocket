@@ -2,6 +2,7 @@
 # 工作流名称：下载通达信数据（每周五）
 # 功能描述：每周五北京时间22:00自动下载通达信官网的13个数据文件
 #          计算SHA256校验值，并发布到GitHub Releases
+#          数据发布完成后发送邮件通知（邮件失败不影响发布）
 # 作者：QuantumEdgecode & Deepseek-V4-Flash & 江城庄稼汉
 # 更新时间：2026-05-09
 # ============================================================
@@ -41,6 +42,22 @@ jobs:
     # 超时设置：2小时（120分钟），防止网络问题导致死循环
     # 超时后自动终止作业并标记为失败
     timeout-minutes: 120
+    
+    # ============================================================
+    # 环境变量配置（作业级别）
+    # 邮件相关配置从 GitHub Secrets 读取
+    # ============================================================
+    env:
+      # SMTP 服务器地址（如 smtp.gmail.com、smtp.qq.com 等）
+      MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
+      # SMTP 服务器端口号（SSL/TLS 端口通常为 465 或 587）
+      MAIL_PORT: ${{ secrets.MAIL_PORT }}
+      # 发件邮箱账号（完整的邮箱地址）
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      # 发件邮箱密码或应用专用密码
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      # 收件邮箱地址（支持多个收件人，用逗号分隔）
+      MAIL_TO: ${{ secrets.MAIL_TO }}
     
     # ============================================================
     # 执行步骤
@@ -200,23 +217,29 @@ jobs:
           echo "总运行时间: ${minutes} 分 ${seconds} 秒"
       
       # ----------------------------------------------------------
-      # 步骤7：获取当前日期
-      # 用于Release的标签名和标题
+      # 步骤7：获取当前日期和IP地址
+      # 用于Release的标签名、标题和邮件通知
       # ----------------------------------------------------------
-      - name: 获取当前日期
+      - name: 获取当前日期和服务器IP
         id: date
         run: |
           # 获取北京时间日期（格式：YYYY-MM-DD）
           echo "date=$(TZ='Asia/Shanghai' date +%Y-%m-%d)" >> $GITHUB_OUTPUT
           # 获取完整的日期时间
           echo "datetime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          # 获取 GitHub Actions 运行服务器的公网 IP 地址
+          set +x  # 关闭命令回显，保护隐私
+          echo "IP_ADDRESS=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')" >> $GITHUB_ENV
+          set -x  # 恢复命令回显
       
       # ----------------------------------------------------------
       # 步骤8：创建GitHub Release并上传文件
       # 使用softprops/action-gh-release动作
       # 将所有下载的数据文件和校验文件上传到Release
+      # 这是核心步骤，必须成功
       # ----------------------------------------------------------
-      - name: 创建 Release
+      - name: 创建 Release 并上传数据文件
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
           # Release标签：v + 日期（如 v2026-05-09）
