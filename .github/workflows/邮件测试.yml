@@ -1,0 +1,234 @@
+# ============================================================
+# 工作流名称：通达信数据邮件测试
+# 功能描述：手动触发测试邮件发送功能
+#           验证 SMTP 服务器配置和 Secrets 是否正确
+#           获取 GitHub Actions 运行服务器的公网 IP 地址
+#           发送 HTML 格式的通达信数据更新通知邮件
+# 作者：QuantumEdgecode & Deepseek-V4-Flash & 江城庄稼汉
+# 创建时间：2026-05-09
+# ============================================================
+
+name: 通达信数据邮件测试
+
+# ============================================================
+# 触发条件配置
+# ============================================================
+on:
+  # 手动触发：仅在需要测试邮件功能时手动运行
+  # 入口：仓库页面 → Actions 标签 → 选择本工作流 → Run workflow
+  workflow_dispatch:
+
+# ============================================================
+# 全局权限配置
+# 邮件测试只需要读取权限即可
+# ============================================================
+permissions:
+  contents: read  # 仅需读取仓库内容权限
+
+# ============================================================
+# 作业定义
+# ============================================================
+jobs:
+  # 作业名称：邮件测试
+  email-test:
+    # 运行环境：使用最新版 Ubuntu 系统
+    runs-on: ubuntu-latest
+    
+    # 超时设置：5分钟，邮件发送通常很快，避免长时间等待
+    timeout-minutes: 5
+    
+    # ============================================================
+    # 环境变量配置（作业级别）
+    # 从 GitHub Secrets 读取敏感信息，保护隐私安全
+    # 使用 env 统一管理，方便多个步骤共用
+    # ============================================================
+    env:
+      # SMTP 服务器地址（如 smtp.gmail.com、smtp.qq.com 等）
+      MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
+      # SMTP 服务器端口号（SSL/TLS 端口通常为 465 或 587）
+      MAIL_PORT: ${{ secrets.MAIL_PORT }}
+      # 发件邮箱账号（完整的邮箱地址）
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      # 发件邮箱密码或应用专用密码
+      # Gmail 用户需要开启两步验证后生成应用专用密码
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      # 收件邮箱地址（支持多个收件人，用逗号分隔）
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+    
+    # ============================================================
+    # 执行步骤列表
+    # ============================================================
+    steps:
+      # ----------------------------------------------------------
+      # 步骤1：获取当前北京时间
+      # 用于邮件主题和正文中的时间显示
+      # 使用 TZ 环境变量设置时区为亚洲/上海（北京时间 UTC+8）
+      # ----------------------------------------------------------
+      - name: '获取当前日期时间'
+        run: |
+          # 将北京时间保存到 GITHUB_ENV，供后续步骤使用
+          echo "REPORT_DATE=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+          # 在日志中显示当前北京时间
+          echo "当前北京时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+      
+      # ----------------------------------------------------------
+      # 步骤2：获取 GitHub Actions 运行服务器的公网 IP 地址
+      # 使用 ipify.org 提供的免费 IP 查询 API
+      # set +x 关闭命令回显，防止敏感信息在日志中泄露
+      # ----------------------------------------------------------
+      - name: '获取 Actions 运行服务器 IP 地址'
+        run: |
+          set +x  # 关闭命令回显模式，保护隐私
+          # 调用 ipify API 获取公网 IP，用 jq 解析 JSON 响应
+          echo "IP_ADDRESS=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')" >> $GITHUB_ENV
+          set -x  # 恢复命令回显模式
+      
+      # ----------------------------------------------------------
+      # 步骤3：在日志中输出 IP 地址信息
+      # 用于调试和确认网络连接状态
+      # 同时验证 IP 地址是否成功获取
+      # ----------------------------------------------------------
+      - name: '写入 IP 地址到日志'
+        run: |
+          # 检查 IP_ADDRESS 变量是否成功获取
+          if [ -n "${IP_ADDRESS}" ]; then
+            # 格式化输出 IP 地址信息到日志
+            echo "========================================="
+            echo "  GitHub Actions 运行服务器 IP 地址"
+            echo "  IP: ${IP_ADDRESS}"
+            echo "========================================="
+          else
+            # IP 获取失败时的警告信息
+            echo "⚠️ IP地址获取失败，请检查网络连接"
+          fi
+      
+      # ----------------------------------------------------------
+      # 步骤4：发送通达信数据更新通知邮件
+      # 使用 dawidd6/action-send-mail@master 第三方动作
+      # 支持 HTML 和纯文本两种格式的邮件正文
+      # 邮件内容包含运行时间、服务器 IP、数据文件列表等信息
+      # ----------------------------------------------------------
+      - name: '发送通达信数据更新通知邮件'
+        uses: dawidd6/action-send-mail@master
+        with:
+          # ===== SMTP 服务器配置 =====
+          # 从 env 环境变量读取服务器地址
+          server_address: ${{ env.MAIL_ADDRESS }}
+          # 从 env 环境变量读取端口号
+          server_port: ${{ env.MAIL_PORT }}
+          # 使用 SSL/TLS 加密连接，保证邮件传输安全
+          secure: true
+          
+          # ===== 邮箱认证信息 =====
+          # 发件邮箱账号
+          username: ${{ env.MAIL_USERNAME }}
+          # 发件邮箱密码（应用专用密码）
+          password: ${{ env.MAIL_PASSWORD }}
+          
+          # ===== 邮件头部信息 =====
+          # 邮件主题：包含数据更新时间
+          subject: 通达信数据更新通知 (${{ env.REPORT_DATE }})
+          
+          # 收件人邮箱地址
+          to: ${{ env.MAIL_TO }}
+          
+          # 发件人显示名称和邮箱地址
+          # 格式：显示名称 <邮箱地址>
+          from: 通达信数据自动更新 <${{ env.MAIL_USERNAME }}>
+          
+          # ===== 邮件正文（HTML 格式）=====
+          # 使用 HTML 表格和 CSS 样式美化邮件外观
+          # 包含运行信息、数据文件列表和下载链接
+          html_body: |
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="UTF-8">
+              <style>
+                /* 基础样式：设置页面背景和字体 */
+                body { font-family: Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 20px; }
+                /* 主容器：居中显示，白色背景，圆角阴影 */
+                .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                /* 页头区域：渐变色背景，白色文字 */
+                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }
+                /* 内容区域：内边距 */
+                .content { padding: 20px; }
+                /* 信息盒子：蓝色左边框，浅蓝背景，用于突出显示重要信息 */
+                .info-box { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 15px; margin: 15px 0; border-radius: 4px; }
+                /* 页脚区域：小号灰色文字，居中 */
+                .footer { text-align: center; color: #999; font-size: 12px; margin-top: 20px; }
+              </style>
+            </head>
+            <body>
+              <div class="container">
+                <!-- 邮件页头 -->
+                <div class="header">
+                  <h2>📊 通达信数据更新通知</h2>
+                </div>
+                
+                <!-- 邮件正文内容 -->
+                <div class="content">
+                  <p>您好！</p>
+                  <p>通达信数据工作流已于 <strong>${{ env.REPORT_DATE }}</strong> 完成测试运行。</p>
+                  
+                  <!-- 重要信息盒子 -->
+                  <div class="info-box">
+                    <strong>📋 运行信息：</strong><br>
+                    • 运行时间：${{ env.REPORT_DATE }} (北京时间)<br>
+                    • GitHub Actions 服务器 IP：${{ env.IP_ADDRESS }}<br>
+                    • 数据来源：<a href="https://www.tdx.com.cn">通达信官网</a><br>
+                  </div>
+                  
+                  <!-- 数据文件列表 -->
+                  <p>📁 <strong>本次更新包含以下数据文件：</strong></p>
+                  <ul>
+                    <li>沪市日线数据</li>
+                    <li>深市日线数据</li>
+                    <li>北交所日线数据</li>
+                    <li>通达信指数日线</li>
+                    <li>沪市指数日线</li>
+                    <li>深市指数日线</li>
+                    <li>沪市日线(4位代码)</li>
+                    <li>深市日线(4位代码)</li>
+                    <li>沪市全权日线</li>
+                    <li>深市全权日线</li>
+                    <li>新三板日线</li>
+                    <li>62板块日线</li>
+                    <li>港股通日线</li>
+                  </ul>
+                  
+                  <!-- 下载链接 -->
+                  <p>🔗 <strong>下载地址：</strong></p>
+                  <p>请前往 <a href="https://github.com/${{ github.repository }}/releases">GitHub Releases</a> 页面下载最新数据。</p>
+                  
+                  <!-- 安全提醒 -->
+                  <p>🔐 所有文件均包含 SHA256 校验值，下载后请验证文件完整性。</p>
+                </div>
+                
+                <!-- 邮件页脚 -->
+                <div class="footer">
+                  <p>此邮件由 GitHub Actions 自动发送</p>
+                  <p>DoraemonPocket - 通达信数据自动更新服务</p>
+                </div>
+              </div>
+            </body>
+            </html>
+          
+          # ===== 邮件正文（纯文本格式）=====
+          # 当邮件客户端不支持 HTML 时，显示此纯文本版本
+          body: |
+            通达信数据更新通知
+            ==================
+            
+            运行时间：${{ env.REPORT_DATE }} (北京时间)
+            GitHub Actions 服务器 IP：${{ env.IP_ADDRESS }}
+            
+            本次更新包含13个数据文件：
+            - 沪市、深市、北交所日线数据
+            - 各类指数日线数据
+            - 港股通、新三板等特色数据
+            
+            下载地址：https://github.com/${{ github.repository }}/releases
+            
+            此邮件由 GitHub Actions 自动发送
+            DoraemonPocket - 通达信数据自动更新服务
