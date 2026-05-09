@@ -1,187 +1,140 @@
 # ============================================================
-# 工作流名称：Telegram 通知调试测试
-# 功能描述：带详细调试信息的 TG 通知测试
+# 工作流名称：Telegram 通知测试
+# 功能描述：手动触发测试 Telegram Bot 消息发送功能
+#           发送当前运行信息到指定的 Telegram 频道或群组
 # 作者：QuantumEdgecode & Deepseek-V4-Flash & 江城庄稼汉
+# 创建时间：2026-05-09
 # ============================================================
 
-name: Telegram 通知调试测试
+name: Telegram 通知测试
 
+# ============================================================
+# 触发条件配置
+# ============================================================
 on:
+  # 手动触发：仅在需要测试通知功能时手动运行
   workflow_dispatch:
 
+# ============================================================
+# 全局权限配置
+# ============================================================
 permissions:
   contents: read
 
+# ============================================================
+# 作业定义
+# ============================================================
 jobs:
-  tg-debug-test:
+  # 作业名称：TG 通知测试
+  tg-notify-test:
+    # 运行环境：Ubuntu 最新版
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    
+    # 超时设置：1分钟足够
+    timeout-minutes: 1
+    
+    # ============================================================
+    # 关键修复：将 env 从步骤级别提升到作业级别
+    # 这样 if 条件可以直接引用 env 变量
+    # ============================================================
+    env:
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
     
     steps:
+      # ----------------------------------------------------------
+      # 步骤1：获取运行环境信息
+      # ----------------------------------------------------------
       - name: 收集运行环境信息
         id: info
         run: |
+          # 获取北京时间
           echo "CURRENT_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          # 获取仓库名称
+          echo "REPO_NAME=${{ github.repository }}" >> $GITHUB_OUTPUT
+          # 获取触发方式
+          echo "EVENT_NAME=${{ github.event_name }}" >> $GITHUB_OUTPUT
+          # 获取运行 ID
+          echo "RUN_ID=${{ github.run_id }}" >> $GITHUB_OUTPUT
+          
+          echo "运行信息收集完成！"
       
       # ----------------------------------------------------------
-      # 调试步骤1：验证 Token 和 Chat ID 格式
+      # 步骤2：检查 Secrets 是否配置
       # ----------------------------------------------------------
-      - name: 验证 Token 和 Chat ID
+      - name: 检查配置
         run: |
-          echo "========================================="
-          echo "  Token 和 Chat ID 格式验证"
-          echo "========================================="
-          
-          # 检查 Token 是否设置
-          if [ -z "${{ secrets.TG_BOT_TOKEN }}" ]; then
-            echo "❌ 错误：TG_BOT_TOKEN 未设置！"
-            echo "请前往 Settings → Secrets → Actions 添加"
+          if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
+            echo "✅ TG_BOT_TOKEN 和 TG_CHAT_ID 已配置"
           else
-            # 只显示 Token 的前10位和后5位，保护隐私
-            TOKEN_LEN=${#TG_BOT_TOKEN}
-            echo "✅ TG_BOT_TOKEN 已设置 (长度: ${TOKEN_LEN})"
-            echo "   Token 格式: ${TG_BOT_TOKEN:0:10}...${TG_BOT_TOKEN: -5}"
+            echo "⚠️ TG_BOT_TOKEN 或 TG_CHAT_ID 未配置"
+            if [ -z "${TG_BOT_TOKEN}" ]; then
+              echo "   - TG_BOT_TOKEN 未设置"
+            fi
+            if [ -z "${TG_CHAT_ID}" ]; then
+              echo "   - TG_CHAT_ID 未设置"
+            fi
           fi
-          
-          # 检查 Chat ID 是否设置
-          if [ -z "${{ secrets.TG_CHAT_ID }}" ]; then
-            echo "❌ 错误：TG_CHAT_ID 未设置！"
-            echo "请前往 Settings → Secrets → Actions 添加"
-          else
-            echo "✅ TG_CHAT_ID 已设置: ${{ secrets.TG_CHAT_ID }}"
-          fi
-          
-          echo ""
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
       
       # ----------------------------------------------------------
-      # 调试步骤2：测试 API 连接（getMe）
+      # 步骤3：发送 Telegram 通知（curl 方式）
+      # 现在 if 可以正确读取作业级别的 env 变量
       # ----------------------------------------------------------
-      - name: 测试 Bot Token 有效性
+      - name: 发送 TG 通知（curl 方式）
+        if: env.TG_BOT_TOKEN != ''
         run: |
-          echo "========================================="
-          echo "  测试 Bot Token 是否有效"
-          echo "========================================="
+          # 构建消息内容（支持 Markdown 格式）
+          MESSAGE="📊 *GitHub Actions 通知*
           
-          # 调用 getMe API 验证 Token
-          RESPONSE=$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
+          🕐 *时间：* ${{ steps.info.outputs.CURRENT_TIME }} (北京时间)
+          📦 *仓库：* ${{ github.repository }}
+          🔄 *事件：* ${{ github.event_name }}
+          🏃 *运行 ID：* ${{ github.run_id }}
+          🔗 *查看详情：* [Actions 运行页面](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           
-          echo "API 响应:"
-          echo "$RESPONSE"
-          echo ""
+          ✅ 测试通知成功！"
           
-          # 检查是否成功
-          if echo "$RESPONSE" | grep -q '"ok":true'; then
-            BOT_NAME=$(echo "$RESPONSE" | jq -r '.result.username')
-            echo "✅ Token 有效！Bot 用户名: @${BOT_NAME}"
-          else
-            echo "❌ Token 无效！请检查 TG_BOT_TOKEN 是否正确"
-            echo "   确保 Token 格式为: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
-          fi
-          
-          echo ""
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-      
-      # ----------------------------------------------------------
-      # 调试步骤3：测试发送消息（带详细响应）
-      # ----------------------------------------------------------
-      - name: 发送测试消息（调试模式）
-        run: |
-          echo "========================================="
-          echo "  发送测试消息"
-          echo "========================================="
-          
-          # 简单的测试消息
-          MESSAGE="🧪 Telegram 通知测试
-          
-          🕐 时间: ${{ steps.info.outputs.CURRENT_TIME }} (北京时间)
-          📦 仓库: ${{ github.repository }}
-          
-          ✅ 如果看到这条消息，说明配置成功！"
-          
-          # 发送消息并保存完整响应
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+          # 发送消息到 Telegram
+          RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT_ID}" \
             -d parse_mode="Markdown" \
             -d text="${MESSAGE}")
           
-          # 分离响应体和 HTTP 状态码
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          
-          echo "HTTP 状态码: ${HTTP_CODE}"
-          echo "API 响应: ${BODY}"
-          echo ""
-          
-          # 根据响应判断结果
-          if echo "$BODY" | grep -q '"ok":true'; then
-            echo "✅ 消息发送成功！"
-          elif echo "$BODY" | grep -q '"error_code":400'; then
-            echo "❌ 错误 400 - Chat ID 不存在或格式错误"
-            echo "   请检查 TG_CHAT_ID: ${TG_CHAT_ID}"
-          elif echo "$BODY" | grep -q '"error_code":401'; then
-            echo "❌ 错误 401 - Bot Token 未授权"
-          elif echo "$BODY" | grep -q '"error_code":403'; then
-            echo "❌ 错误 403 - Bot 被阻止或不在该对话中"
-            echo "   请先在 Telegram 中给 Bot 发送一条消息"
-          elif echo "$BODY" | grep -q '"error_code":404'; then
-            echo "❌ 错误 404 - 请检查 Bot Token 是否正确"
+          # 检查发送结果
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "✅ Telegram 消息发送成功！"
+          else
+            echo "❌ 消息发送失败"
+            echo "API 响应: $RESPONSE"
           fi
-          
-          echo ""
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       
       # ----------------------------------------------------------
-      # 调试步骤4：尝试无 Markdown 格式发送
+      # 步骤4：发送纯文本备用消息（Markdown 失败时使用）
       # ----------------------------------------------------------
-      - name: 发送纯文本消息（备用测试）
-        if: always()
+      - name: 发送纯文本测试消息
+        if: env.TG_BOT_TOKEN != ''
         run: |
-          echo "========================================="
-          echo "  尝试发送纯文本消息"
-          echo "========================================="
-          
-          # 不使用 Markdown 格式的纯文本消息
-          MESSAGE="Telegram 通知测试 - 纯文本
+          MESSAGE="GitHub Actions 通知
           
           时间: ${{ steps.info.outputs.CURRENT_TIME }}
           仓库: ${{ github.repository }}
+          事件: ${{ github.event_name }}
+          运行ID: ${{ github.run_id }}
+          链接: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           
-          测试成功！"
+          测试通知成功！"
           
-          RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT_ID}" \
-            -d text="${MESSAGE}")
+            -d text="${MESSAGE}" > /dev/null
           
-          echo "API 响应: ${RESPONSE}"
-          
-          if echo "$RESPONSE" | grep -q '"ok":true'; then
-            echo "✅ 纯文本消息发送成功！（可能是 Markdown 格式问题）"
-          else
-            echo "⚠️ 纯文本消息也发送失败，请检查 Token 和 Chat ID"
-          fi
-          
-          echo ""
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-
+          echo "✅ 纯文本消息已发送"
+      
       # ----------------------------------------------------------
-      # 完成提示
+      # 步骤5：完成提示
       # ----------------------------------------------------------
-      - name: 调试完成
+      - name: 测试完成
         run: |
           echo "========================================="
-          echo "  调试测试完成！"
-          echo "  请查看上方日志定位问题"
+          echo "  Telegram 通知测试完成！"
           echo "========================================="
-          echo ""
-          echo "常见问题排查："
-          echo "1. 404 错误 → Token 格式不对或 Bot 不存在"
-          echo "2. 400 错误 → Chat ID 格式不对"
-          echo "3. 403 错误 → Bot 没有权限或未加入对话"
-          echo "4. 确保先给 Bot 发送过 /start 命令"
