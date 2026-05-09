@@ -1,92 +1,158 @@
+# ============================================================
+# 工作流名称：下载通达信数据（每周五）
+# 功能描述：每周五北京时间22:00自动下载通达信官网的13个数据文件
+#          计算SHA256校验值，并发布到GitHub Releases
+# 作者：QuantumEdgecode
+# 更新时间：2026-05-09
+# ============================================================
+
 name: 下载通达信数据（每周五）
 
+# ============================================================
+# 触发条件配置
+# ============================================================
 on:
+  # 定时触发：每周五北京时间22:00执行
+  # cron表达式：分 时 日 月 周
+  # UTC 14:00 = 北京时间 22:00 (UTC+8)
   schedule:
-    # 每周五北京时间 22:00 (UTC+8) = UTC 14:00
     - cron: '0 14 * * 5'
-  workflow_dispatch:  # 允许手动触发
+  
+  # 手动触发：允许在GitHub Actions页面手动运行
+  workflow_dispatch:
 
+# ============================================================
+# 全局权限配置
+# 解决"Resource not accessible by integration"权限错误
+# ============================================================
 permissions:
-  contents: write  # 解决权限问题
-  actions: read    # 允许读取工作流信息
+  contents: write  # 允许创建和上传Release资源
+  actions: read    # 允许读取工作流运行信息
 
+# ============================================================
+# 作业定义
+# ============================================================
 jobs:
+  # 作业名称：下载并发布
   download-and-release:
+    # 运行环境：使用最新版Ubuntu系统
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 关键修改：设置作业超时为2小时，防止死循环或长时间卡住
     
+    # 超时设置：2小时（120分钟），防止网络问题导致死循环
+    # 超时后自动终止作业并标记为失败
+    timeout-minutes: 120
+    
+    # ============================================================
+    # 执行步骤
+    # ============================================================
     steps:
+      # ----------------------------------------------------------
+      # 步骤1：记录工作流开始时间
+      # 用于后续计算总运行时长
+      # ----------------------------------------------------------
       - name: 记录开始时间
         id: start_time
         run: |
+          # 获取UTC时间戳（秒），用于计算时间差
           echo "start=$(date -u +%s)" >> $GITHUB_OUTPUT
+          # 获取北京时间格式化的开始时间
           echo "start_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          # 在日志中显示开始时间
           echo "开始执行时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间"
       
+      # ----------------------------------------------------------
+      # 步骤2：检出仓库代码
+      # 使用GitHub官方checkout动作，版本v4
+      # ----------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
       
+      # ----------------------------------------------------------
+      # 步骤3：创建数据存储目录
+      # 创建tdx_data文件夹用于存放下载的数据文件
+      # ----------------------------------------------------------
       - name: 创建数据目录
         run: mkdir -p tdx_data
       
+      # ----------------------------------------------------------
+      # 步骤4：下载通达信数据文件
+      # 从通达信官网下载13个数据压缩包
+      # 包含沪市、深市、北交所等各类股票数据
+      # ----------------------------------------------------------
       - name: 下载通达信数据文件
         run: |
+          # 进入数据目录
           cd tdx_data
           
-          # 定义所有下载链接
+          # 定义所有需要下载的文件URL列表
+          # 共13个文件，覆盖主要市场数据
           urls=(
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/bjlday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/tdxzs_day.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shzsday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szzsday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday_4.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday_4.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shqqday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szqqday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/xsbday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/62day.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/ggtday.zip"
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday.zip"      # 沪市日线数据
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday.zip"      # 深市日线数据
+            "https://www.tdx.com.cn/products/data/data/vipdoc/bjlday.zip"      # 北交所日线数据
+            "https://www.tdx.com.cn/products/data/data/vipdoc/tdxzs_day.zip"   # 通达信指数日线
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shzsday.zip"     # 沪市指数日线
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szzsday.zip"     # 深市指数日线
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday_4.zip"    # 沪市日线（4位股票代码）
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday_4.zip"    # 深市日线（4位股票代码）
+            "https://www.tdx.com.cn/products/data/data/vipdoc/shqqday.zip"     # 沪市全权日线
+            "https://www.tdx.com.cn/products/data/data/vipdoc/szqqday.zip"     # 深市全权日线
+            "https://www.tdx.com.cn/products/data/data/vipdoc/xsbday.zip"      # 新三板日线
+            "https://www.tdx.com.cn/products/data/data/vipdoc/62day.zip"       # 62板块日线
+            "https://www.tdx.com.cn/products/data/data/vipdoc/ggtday.zip"      # 港股通日线
           )
           
-          # 下载所有文件
+          # 遍历下载所有文件
           for url in "${urls[@]}"; do
+            # 从URL中提取文件名
             filename=$(basename "$url")
             echo "正在下载: $filename..."
+            # 使用wget下载，超时30秒，最多重试3次
+            # -q 静默模式，-O 指定输出文件名
             wget --timeout=30 --tries=3 -q "$url" -O "$filename" && echo "✓ $filename 下载成功" || echo "✗ $filename 下载失败"
           done
       
+      # ----------------------------------------------------------
+      # 步骤5：计算SHA256校验值
+      # 为每个下载的文件生成SHA256哈希值
+      # 创建两种格式：文本格式（SHA256SUMS.txt）和JSON格式（checksums.json）
+      # ----------------------------------------------------------
       - name: 计算 SHA256 校验值
         run: |
           echo "正在计算 SHA256 校验值..."
           echo ""
           
+          # 进入数据目录
           cd tdx_data
           
-          # 创建文本格式校验文件
+          # ===== 创建文本格式校验文件 =====
           echo "# SHA256 校验值" > SHA256SUMS.txt
           echo "# 生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间" >> SHA256SUMS.txt
           echo "# 验证命令: sha256sum -c SHA256SUMS.txt" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
           
-          # 创建 JSON 格式校验文件
+          # ===== 创建JSON格式校验文件 =====
           echo "{" > checksums.json
           echo "  \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> checksums.json
           echo "  \"generated_at_beijing\": \"$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')\"," >> checksums.json
           echo "  \"files\": {" >> checksums.json
           
-          first=true
+          # 遍历所有zip文件计算校验值
+          first=true  # 标记是否为第一个文件，用于控制JSON逗号
           for file in *.zip; do
             if [ -f "$file" ]; then
+              # 计算SHA256哈希值
               sha256=$(sha256sum "$file" | awk '{print $1}')
+              # 获取文件大小（字节）
               size=$(stat -c%s "$file")
+              # 转换为KB
               size_kb=$((size / 1024))
               
-              # 写入文本格式
+              # 写入文本格式校验值
               echo "$sha256  $file" >> SHA256SUMS.txt
               
-              # 写入 JSON 格式
+              # 写入JSON格式校验值
+              # 第一个文件不加逗号，后续文件加逗号
               if [ "$first" = true ]; then
                 first=false
               else
@@ -94,10 +160,12 @@ jobs:
               fi
               echo -n "    \"$file\": {\"sha256\": \"$sha256\", \"size\": $size, \"size_kb\": $size_kb}" >> checksums.json
               
+              # 在日志中显示校验结果
               echo "✓ $file: $sha256 (${size_kb}KB)"
             fi
           done
           
+          # 完成JSON文件
           echo "" >> checksums.json
           echo "  }" >> checksums.json
           echo "}" >> checksums.json
@@ -105,33 +173,57 @@ jobs:
           echo ""
           echo "SHA256 校验值计算完成！"
       
+      # ----------------------------------------------------------
+      # 步骤6：计算工作流运行时间
+      # 通过结束时间减开始时间得出总耗时
+      # ----------------------------------------------------------
       - name: 计算运行时间
         id: run_time
         run: |
+          # 获取当前UTC时间戳作为结束时间
           end=$(date -u +%s)
+          # 从步骤1获取开始时间戳
           start=${{ steps.start_time.outputs.start }}
+          # 计算时间差（秒）
           duration=$((end - start))
+          # 转换为分钟和秒
           minutes=$((duration / 60))
           seconds=$((duration % 60))
           
+          # 保存结束时间和耗时到输出变量
           echo "end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
           echo "duration=${minutes}分${seconds}秒" >> $GITHUB_OUTPUT
           echo "duration_seconds=${duration}" >> $GITHUB_OUTPUT
           
+          # 在日志中显示运行时间统计
           echo "结束时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间"
           echo "总运行时间: ${minutes} 分 ${seconds} 秒"
       
+      # ----------------------------------------------------------
+      # 步骤7：获取当前日期
+      # 用于Release的标签名和标题
+      # ----------------------------------------------------------
       - name: 获取当前日期
         id: date
         run: |
+          # 获取北京时间日期（格式：YYYY-MM-DD）
           echo "date=$(TZ='Asia/Shanghai' date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          # 获取完整的日期时间
           echo "datetime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
       
+      # ----------------------------------------------------------
+      # 步骤8：创建GitHub Release并上传文件
+      # 使用softprops/action-gh-release动作
+      # 将所有下载的数据文件和校验文件上传到Release
+      # ----------------------------------------------------------
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
+          # Release标签：v + 日期（如 v2026-05-09）
           tag_name: v${{ steps.date.outputs.date }}
+          # Release标题
           name: 通达信数据 - ${{ steps.date.outputs.date }}
+          # Release描述内容（Markdown格式）
           body: |
             ## 📊 通达信数据下载
             
