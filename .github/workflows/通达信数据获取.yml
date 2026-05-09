@@ -6,6 +6,10 @@ on:
     - cron: '0 14 * * 5'
   workflow_dispatch:  # 允许手动触发
 
+permissions:
+  contents: write  # 解决权限问题
+  actions: read    # 允许读取工作流信息
+
 jobs:
   download-and-release:
     runs-on: ubuntu-latest
@@ -141,21 +145,21 @@ jobs:
             
             ### 📁 数据文件列表
             
-            | 文件名 | 说明 | 大小 |
-            |--------|------|------|
-            | `shlday.zip` | 沪市日线数据 | - |
-            | `szlday.zip` | 深市日线数据 | - |
-            | `bjlday.zip` | 北交所日线数据 | - |
-            | `tdxzs_day.zip` | 通达信指数日线 | - |
-            | `shzsday.zip` | 沪市指数日线 | - |
-            | `szzsday.zip` | 深市指数日线 | - |
-            | `shlday_4.zip` | 沪市日线(4位代码) | - |
-            | `szlday_4.zip` | 深市日线(4位代码) | - |
-            | `shqqday.zip` | 沪市全权日线 | - |
-            | `szqqday.zip` | 深市全权日线 | - |
-            | `xsbday.zip` | 新三板日线 | - |
-            | `62day.zip` | 62板块日线 | - |
-            | `ggtday.zip` | 港股通日线 | - |
+            | 文件名 | 说明 |
+            |--------|------|
+            | `shlday.zip` | 沪市日线数据 |
+            | `szlday.zip` | 深市日线数据 |
+            | `bjlday.zip` | 北交所日线数据 |
+            | `tdxzs_day.zip` | 通达信指数日线 |
+            | `shzsday.zip` | 沪市指数日线 |
+            | `szzsday.zip` | 深市指数日线 |
+            | `shlday_4.zip` | 沪市日线(4位代码) |
+            | `szlday_4.zip` | 深市日线(4位代码) |
+            | `shqqday.zip` | 沪市全权日线 |
+            | `szqqday.zip` | 深市全权日线 |
+            | `xsbday.zip` | 新三板日线 |
+            | `62day.zip` | 62板块日线 |
+            | `ggtday.zip` | 港股通日线 |
             
             ### 🔐 SHA256 校验
             
@@ -163,8 +167,5 @@ jobs:
             
             **Linux/Mac:**
             ```bash
-            # 下载校验文件
-            wget $(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/v${{ steps.date.outputs.date }} | grep "browser_download_url.*SHA256SUMS.txt" | cut -d '"' -f 4)
-            
             # 验证所有文件
             sha256sum -c SHA256SUMS.txt
