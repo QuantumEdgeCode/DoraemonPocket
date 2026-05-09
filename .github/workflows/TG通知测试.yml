@@ -1,0 +1,113 @@
+# ============================================================
+# 工作流名称：Telegram 通知测试
+# 功能描述：手动触发测试 Telegram Bot 消息发送功能
+#           发送当前运行信息到指定的 Telegram 频道或群组
+# 作者：QuantumEdgecode & Deepseek-V4-Flash & 江城庄稼汉
+# 创建时间：2026-05-09
+# ============================================================
+
+name: Telegram 通知测试
+
+# ============================================================
+# 触发条件配置
+# ============================================================
+on:
+  # 手动触发：仅在需要测试通知功能时手动运行
+  workflow_dispatch:
+
+# ============================================================
+# 全局权限配置
+# ============================================================
+permissions:
+  contents: read
+
+# ============================================================
+# 作业定义
+# ============================================================
+jobs:
+  # 作业名称：TG 通知测试
+  tg-notify-test:
+    # 运行环境：Ubuntu 最新版
+    runs-on: ubuntu-latest
+    
+    # 超时设置：1分钟足够
+    timeout-minutes: 1
+    
+    steps:
+      # ----------------------------------------------------------
+      # 步骤1：获取运行环境信息
+      # 收集当前时间、仓库信息等用于消息内容
+      # ----------------------------------------------------------
+      - name: 收集运行环境信息
+        id: info
+        run: |
+          # 获取北京时间
+          echo "CURRENT_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          # 获取仓库名称
+          echo "REPO_NAME=${{ github.repository }}" >> $GITHUB_OUTPUT
+          # 获取触发方式
+          echo "EVENT_NAME=${{ github.event_name }}" >> $GITHUB_OUTPUT
+          # 获取运行 ID
+          echo "RUN_ID=${{ github.run_id }}" >> $GITHUB_OUTPUT
+          
+          echo "运行信息收集完成！"
+      
+      # ----------------------------------------------------------
+      # 步骤2：发送 Telegram 通知（方式一：使用 curl）
+      # 直接调用 Telegram Bot API 发送消息
+      # ----------------------------------------------------------
+      - name: 发送 TG 通知（curl 方式）
+        if: env.TG_BOT_TOKEN != '' && env.TG_CHAT_ID != ''
+        run: |
+          # 构建消息内容（支持 Markdown 格式）
+          MESSAGE="📊 *GitHub Actions 通知*
+          
+          🕐 *时间：* ${{ steps.info.outputs.CURRENT_TIME }} (北京时间)
+          📦 *仓库：* ${{ github.repository }}
+          🔄 *事件：* ${{ github.event_name }}
+          🏃 *运行 ID：* ${{ github.run_id }}
+          🔗 *查看详情：* [Actions 运行页面](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          
+          ✅ 测试通知成功！"
+          
+          # 发送消息到 Telegram
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="${MESSAGE}"
+          
+          echo ""
+          echo "✅ Telegram 消息发送完成！"
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      
+      # ----------------------------------------------------------
+      # 步骤3：发送 Telegram 通知（方式二：使用第三方 Action）
+      # 使用 appleboy/telegram-action 发送消息
+      # 这是一个备用方案，与方式二选一即可
+      # ----------------------------------------------------------
+      # - name: 发送 TG 通知（Action 方式）
+      #   uses: appleboy/telegram-action@master
+      #   if: env.TG_BOT_TOKEN != '' && env.TG_CHAT_ID != ''
+      #   with:
+      #     to: ${{ secrets.TG_CHAT_ID }}
+      #     token: ${{ secrets.TG_BOT_TOKEN }}
+      #     message: |
+      #       📊 GitHub Actions 通知
+      #       
+      #       🕐 时间：${{ steps.info.outputs.CURRENT_TIME }}
+      #       📦 仓库：${{ github.repository }}
+      #       🔄 事件：${{ github.event_name }}
+      #       🏃 运行 ID：${{ github.run_id }}
+      #       
+      #       ✅ 测试通知成功！
+
+      # ----------------------------------------------------------
+      # 步骤4：完成提示
+      # ----------------------------------------------------------
+      - name: 测试完成
+        run: |
+          echo "========================================="
+          echo "  Telegram 通知测试完成！"
+          echo "========================================="
