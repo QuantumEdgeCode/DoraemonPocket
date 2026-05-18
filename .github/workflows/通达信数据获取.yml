@@ -3,6 +3,8 @@
 # 功能描述：每周五北京时间22:00自动下载通达信官网的13个数据文件
 #          使用矩阵策略实现多IP并行下载，每个文件一个独立IP
 #          下载完成后合并文件、计算SHA256、打包发布
+#          邮件通知包含所有13个下载节点的IP地址
+# 文件路径：.github/workflows/download-tdx-data.yml
 # 作者：QuantumEdgecode & Deepseek-V4-Flash & 江城庄稼汉
 # 更新时间：2026-05-18
 # ============================================================
@@ -26,6 +28,7 @@ jobs:
   # ============================================================
   # 作业1：多IP并行下载（矩阵策略）
   # 功能：使用矩阵策略创建13个独立job，每个job使用独立IP下载一个文件
+  # 输出：下载的文件 + IP信息（通过Artifact传递）
   # ============================================================
   download-files:
     runs-on: ubuntu-latest
@@ -92,8 +95,12 @@ jobs:
             url: https://www.tdx.com.cn/products/data/data/vipdoc/ggtday.zip
             desc: 港股通日线
     
+    # 输出定义：将下载信息输出给后续job使用
+    outputs:
+      download_info: ${{ steps.prepare_output.outputs.download_info }}
+    
     steps:
-      # 步骤1：下载单个文件
+      # 步骤1：下载单个文件并记录IP信息
       - name: 下载 ${{ matrix.file.desc }}
         id: download
         run: |
@@ -117,35 +124,47 @@ jobs:
             echo "   SHA256: ${SHA256}"
             echo "   下载IP: ${IP}"
             
-            # 将下载信息保存到文件，用于后续汇总统计
-            cat > download_info.txt << EOF
-download_name=${{ matrix.file.name }}
-download_desc=${{ matrix.file.desc }}
-download_ip=${IP}
-download_size=${SIZE}
-download_sha256=${SHA256}
+            # 将下载信息和IP保存到文件，用于后续汇总
+            # 使用特定格式便于后续解析
+            cat > download_info.json << EOF
+{
+  "name": "${{ matrix.file.name }}",
+  "desc": "${{ matrix.file.desc }}",
+  "ip": "${IP}",
+  "size": ${SIZE},
+  "size_kb": ${SIZE_KB},
+  "sha256": "${SHA256}",
+  "url": "${{ matrix.file.url }}"
+}
 EOF
+            
+            # 同时保存纯文本格式的IP信息
+            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|${IP}|${SIZE_KB}KB|${SHA256}" >> ip_info.txt
           else
             # 下载失败时输出错误并退出
             echo "❌ 下载失败: ${{ matrix.file.name }}.zip"
+            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|FAILED|-|-" >> ip_info.txt
             exit 1
           fi
       
-      # 步骤2：将下载的文件上传为Artifact，用于在job之间传递
+      # 步骤2：将下载的文件和IP信息上传为Artifact
       - name: 上传文件到 Artifact
         uses: actions/upload-artifact@v4
         with:
           # Artifact名称包含文件名，避免冲突
           name: file-${{ matrix.file.name }}
-          # 上传zip文件和下载信息文件
+          # 上传zip文件、JSON信息和IP文本信息
           path: |
             ${{ matrix.file.name }}.zip
-            download_info.txt
+            download_info.json
+            ip_info.txt
           retention-days: 1  # Artifact保留1天后自动删除
 
   # ============================================================
-  # 作业2：合并文件并打包发布
+  # 作业2：合并文件、收集IP信息、打包发布、发送通知
   # 功能：等待所有下载任务完成后，下载所有Artifact并合并处理
+  #       收集所有13个下载节点的IP，打包文件，创建Release
+  #       发送包含所有IP信息的邮件通知
   # ============================================================
   merge-and-release:
     needs: download-files  # 等待所有下载任务完成
@@ -194,7 +213,90 @@ EOF
           # 匹配所有file-开头的Artifact
           pattern: file-*
       
-      # 步骤5：显示下载的Artifact目录结构（调试用）
+      # 步骤5：收集所有IP信息并生成IP汇总表
+      - name: 收集所有IP信息
+        id: collect_ips
+        run: |
+          echo "🌐 正在收集所有下载节点的IP信息..."
+          echo ""
+          echo "============================================================"
+          echo "  多IP并行下载 - IP汇总"
+          echo "============================================================"
+          echo "  文件总数: 13"
+          echo "------------------------------------------------------------"
+          
+          # 创建IP汇总文件
+          echo "# 通达信数据下载 - IP汇总" > all_ips.txt
+          echo "# 下载时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间" >> all_ips.txt
+          echo "" >> all_ips.txt
+          echo "| 序号 | 文件名 | 描述 | 下载IP | 文件大小 | 状态 |" >> all_ips.txt
+          echo "|------|--------|------|--------|----------|------|" >> all_ips.txt
+          
+          # 用于构建邮件的IP列表
+          IP_LIST=""
+          IP_TABLE=""
+          counter=1
+          
+          # 遍历所有Artifact子目录收集IP信息
+          for artifact_dir in artifacts/file-*/; do
+            if [ -d "$artifact_dir" ]; then
+              # 读取IP信息文件
+              if [ -f "$artifact_dir/ip_info.txt" ]; then
+                # 解析IP信息：格式为 文件名|描述|IP|大小|SHA256
+                IFS='|' read -r filename desc ip size sha256 < "$artifact_dir/ip_info.txt"
+                
+                # 格式化输出
+                counter_str=$(printf "%2d" $counter)
+                echo "[$counter_str/13] 文件: $filename"
+                echo "         描述: $desc"
+                echo "         节点IP: $ip"
+                echo "         文件大小: $size"
+                echo "         状态: ✅ 成功"
+                
+                # 添加到汇总表
+                echo "| $counter | $filename | $desc | $ip | $size | ✅ 成功 |" >> all_ips.txt
+                
+                # 构建邮件用的IP列表
+                if [ -n "$IP_LIST" ]; then
+                  IP_LIST="${IP_LIST}, ${ip}"
+                else
+                  IP_LIST="${ip}"
+                fi
+                
+                # 构建邮件用的IP详细表格
+                IP_TABLE="${IP_TABLE}${counter}. ${filename} (${desc})\n"
+                IP_TABLE="${IP_TABLE}   📡 下载节点IP: ${ip}\n"
+                IP_TABLE="${IP_TABLE}   📦 文件大小: ${size}\n\n"
+                
+                counter=$((counter + 1))
+              else
+                echo "⚠️  未找到IP信息文件: $artifact_dir"
+              fi
+            fi
+          done
+          
+          echo "------------------------------------------------------------"
+          echo "  🌐 所有13个下载节点IP:"
+          echo "------------------------------------------------------------"
+          
+          # 显示所有IP（用逗号分隔）
+          echo "$IP_LIST" | tr ',' '\n' | while read ip; do
+            echo "    📡 $ip"
+          done
+          
+          echo "------------------------------------------------------------"
+          
+          # 保存IP信息供后续步骤使用
+          echo "ip_list=${IP_LIST}" >> $GITHUB_OUTPUT
+          echo "ip_table<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$IP_TABLE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # 同时保存到文件
+          echo "$IP_LIST" > ip_list.txt
+          echo -e "$IP_TABLE" > ip_table.txt
+      
+      # 步骤6：显示下载的Artifact目录结构（调试用）
       - name: 显示下载的artifact结构
         run: |
           echo "========== Artifact 目录结构 =========="
@@ -205,7 +307,7 @@ EOF
           # 显示所有zip文件的大小
           find artifacts -type f -name "*.zip" -exec ls -lh {} \;
       
-      # 步骤6：整理文件到日期目录
+      # 步骤7：整理文件到日期目录
       - name: 整理文件到日期目录
         run: |
           # 创建以日期命名的目录
@@ -227,14 +329,12 @@ EOF
                   echo "✅ 已移动: $filename"
                 fi
               done
-              
-              # 合并所有下载信息文件
-              if [ -f "$artifact_dir/download_info.txt" ]; then
-                cat "$artifact_dir/download_info.txt" >> "$DATA_DIR/all_download_info.txt"
-                echo "---" >> "$DATA_DIR/all_download_info.txt"
-              fi
             fi
           done
+          
+          # 将IP汇总文件也移到数据目录
+          cp all_ips.txt "$DATA_DIR/" 2>/dev/null || true
+          cp ip_list.txt "$DATA_DIR/" 2>/dev/null || true
           
           # 清理Artifact临时目录
           rm -rf artifacts
@@ -255,7 +355,7 @@ EOF
             exit 1
           fi
       
-      # 步骤7：计算所有文件的SHA256校验值
+      # 步骤8：计算所有文件的SHA256校验值
       - name: 计算 SHA256 校验值
         run: |
           # 切换到日期目录
@@ -288,7 +388,7 @@ EOF
           echo ""
           echo "✅ SHA256 校验值计算完成！"
       
-      # 步骤8：将所有文件打包为一个ZIP文件
+      # 步骤9：将所有文件打包为一个ZIP文件
       - name: 打包数据文件
         run: |
           # 定义目录名和打包文件名
@@ -306,7 +406,7 @@ EOF
           echo "✅ 打包完成:"
           ls -lh "$ZIP_NAME"
       
-      # 步骤9：计算工作流运行时间
+      # 步骤10：计算工作流运行时间
       - name: 计算运行时间
         id: run_time
         run: |
@@ -322,14 +422,14 @@ EOF
           echo "end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
           echo "duration=${minutes}分${seconds}秒" >> $GITHUB_OUTPUT
       
-      # 步骤10：获取汇总服务器的公网IP（用于通知信息）
+      # 步骤11：获取汇总服务器的公网IP（用于通知信息）
       - name: 获取汇总服务器IP
         run: |
           # 获取当前运行环境的公网IP
           MERGE_IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
           echo "MERGE_IP=${MERGE_IP}" >> $GITHUB_ENV
       
-      # 步骤11：创建GitHub Release并上传文件
+      # 步骤12：创建GitHub Release并上传文件
       - name: 创建 Release
         id: create_release
         uses: softprops/action-gh-release@v2
@@ -338,12 +438,12 @@ EOF
           tag_name: v${{ steps.date.outputs.date }}
           # Release标题
           name: 通达信数据 - ${{ steps.date.outputs.date }}
-          # Release详细说明
+          # Release详细说明（包含所有13个IP信息）
           body: |
             ## 📊 通达信数据下载（多IP并行）
             
             ### ⏱️ 执行信息
-            | 项目 | 时间 |
+            | 项目 | 内容 |
             |------|------|
             | **开始时间** | ${{ steps.start_time.outputs.start_time }} (北京时间) |
             | **结束时间** | ${{ steps.run_time.outputs.end_time }} (北京时间) |
@@ -351,29 +451,31 @@ EOF
             | **下载模式** | 🌐 多IP并行（13个独立IP） |
             | **汇总IP** | ${{ env.MERGE_IP }} |
             
-            ### 📦 数据包说明
-            使用13个独立IP并行下载，每个文件一个IP，避免单IP限流
-            所有文件已通过SHA256校验，确保数据完整性
+            ### 🌐 下载节点IP列表（13个独立IP）
+            | 序号 | 文件名 | 描述 | 下载节点IP |
+            |------|--------|------|-------------|
+            ${{ steps.collect_ips.outputs.ip_table }}
             
             ### 📁 包含文件列表
-            | 文件名 | 描述 | 大小 | SHA256 |
-            |--------|------|------|--------|
-            | shlday.zip | 沪市日线数据 | - | ✓ |
-            | szlday.zip | 深市日线数据 | - | ✓ |
-            | bjlday.zip | 北交所日线数据 | - | ✓ |
-            | tdxzs_day.zip | 通达信指数日线 | - | ✓ |
-            | shzsday.zip | 沪市指数日线 | - | ✓ |
-            | szzsday.zip | 深市指数日线 | - | ✓ |
-            | shlday_4.zip | 沪市日线（4位代码） | - | ✓ |
-            | szlday_4.zip | 深市日线（4位代码） | - | ✓ |
-            | shqqday.zip | 沪市全权日线 | - | ✓ |
-            | szqqday.zip | 深市全权日线 | - | ✓ |
-            | xsbday.zip | 新三板日线 | - | ✓ |
-            | 62day.zip | 62板块日线 | - | ✓ |
-            | ggtday.zip | 港股通日线 | - | ✓ |
+            | 文件名 | 描述 | SHA256校验 |
+            |--------|------|-------------|
+            | shlday.zip | 沪市日线数据 | ✓ |
+            | szlday.zip | 深市日线数据 | ✓ |
+            | bjlday.zip | 北交所日线数据 | ✓ |
+            | tdxzs_day.zip | 通达信指数日线 | ✓ |
+            | shzsday.zip | 沪市指数日线 | ✓ |
+            | szzsday.zip | 深市指数日线 | ✓ |
+            | shlday_4.zip | 沪市日线（4位代码） | ✓ |
+            | szlday_4.zip | 深市日线（4位代码） | ✓ |
+            | shqqday.zip | 沪市全权日线 | ✓ |
+            | szqqday.zip | 深市全权日线 | ✓ |
+            | xsbday.zip | 新三板日线 | ✓ |
+            | 62day.zip | 62板块日线 | ✓ |
+            | ggtday.zip | 港股通日线 | ✓ |
             
             ### 🔐 校验文件
             - `SHA256SUMS.txt` - 包含所有文件的SHA256校验值
+            - `all_ips.txt` - 包含所有下载节点的IP信息
             
             ### 📥 使用方法
             **1. 下载数据包:**
