@@ -1,143 +1,244 @@
-name: 下载通达信数据（每周五）- 多IP并行
+# ============================================================
+# 工作流名称：下载通达信数据（每周五）- 多IP并行版
+# 功能描述：每周五北京时间22:00自动下载通达信官网的13个数据文件
+#          使用矩阵策略实现多IP并行下载，每个文件分配独立IP
+#          下载完成后合并文件、计算SHA256、打包为Release
+#          通过邮件和Telegram发送通知，包含所有13个节点IP
+# 文件路径：.github/workflows/download-tdx-data.yml
+# 作者：QuantumEdgecode & Deepseek-V4-Flash & 江城庄稼汉
+# 更新时间：2026-05-18
+# ============================================================
 
+name: 下载通达信数据（每周五）
+
+# ============================================================
+# 触发条件配置
+# ============================================================
 on:
   schedule:
+    # 定时触发：每周五 UTC 14:00（北京时间 22:00）
+    # cron表达式：分 时 日 月 周
     - cron: '0 14 * * 5'
+  # 手动触发：允许在GitHub页面手动运行工作流
   workflow_dispatch:
 
+# ============================================================
+# 权限配置
+# ============================================================
 permissions:
-  contents: write
-  actions: read
+  contents: write  # 允许创建和更新 Release
+  actions: read    # 允许读取工作流运行信息
 
 jobs:
+  # ============================================================
+  # 作业1：多IP并行下载（矩阵策略）
+  # 功能：使用矩阵策略创建13个独立job，每个job使用独立IP下载一个文件
+  # 输出：下载的zip文件 + 节点IP信息（通过Artifact传递给后续job）
+  # ============================================================
   download-files:
+    # 运行环境：Ubuntu最新版
     runs-on: ubuntu-latest
+    # 单个下载任务超时时间（30分钟）
     timeout-minutes: 30
     
+    # 矩阵策略配置：并行执行13个下载任务
     strategy:
+      # 单个文件下载失败不影响其他文件的下载
       fail-fast: false
+      # 最大并行数（GitHub免费版限制为20个并发job）
       max-parallel: 13
+      
+      # 定义需要下载的13个通达信数据文件
       matrix:
         file:
+          # 文件1：沪市日线数据
           - name: shlday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/shlday.zip
             desc: 沪市日线数据
+          # 文件2：深市日线数据
           - name: szlday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/szlday.zip
             desc: 深市日线数据
+          # 文件3：北交所日线数据
           - name: bjlday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/bjlday.zip
             desc: 北交所日线数据
+          # 文件4：通达信指数日线
           - name: tdxzs_day
             url: https://www.tdx.com.cn/products/data/data/vipdoc/tdxzs_day.zip
             desc: 通达信指数日线
+          # 文件5：沪市指数日线
           - name: shzsday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/shzsday.zip
             desc: 沪市指数日线
+          # 文件6：深市指数日线
           - name: szzsday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/szzsday.zip
             desc: 深市指数日线
+          # 文件7：沪市日线（4位代码版本）
           - name: shlday_4
             url: https://www.tdx.com.cn/products/data/data/vipdoc/shlday_4.zip
             desc: 沪市日线(4位代码)
+          # 文件8：深市日线（4位代码版本）
           - name: szlday_4
             url: https://www.tdx.com.cn/products/data/data/vipdoc/szlday_4.zip
             desc: 深市日线(4位代码)
+          # 文件9：沪市全权日线
           - name: shqqday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/shqqday.zip
             desc: 沪市全权日线
+          # 文件10：深市全权日线
           - name: szqqday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/szqqday.zip
             desc: 深市全权日线
+          # 文件11：新三板日线
           - name: xsbday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/xsbday.zip
             desc: 新三板日线
+          # 文件12：62板块日线
           - name: 62day
             url: https://www.tdx.com.cn/products/data/data/vipdoc/62day.zip
             desc: 62板块日线
+          # 文件13：港股通日线
           - name: ggtday
             url: https://www.tdx.com.cn/products/data/data/vipdoc/ggtday.zip
             desc: 港股通日线
     
     steps:
+      # ----------------------------------------------------------
+      # 步骤1：下载单个文件并记录节点IP信息
+      # ----------------------------------------------------------
       - name: 下载 ${{ matrix.file.desc }}
         run: |
+          # 获取当前下载节点的公网IP地址
           IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
           echo "下载节点 IP: $IP"
           echo "正在下载: ${{ matrix.file.name }}.zip (${{ matrix.file.desc }})"
           
+          # 使用wget下载文件，设置超时30秒，最多重试3次
           if wget --timeout=30 --tries=3 -q "${{ matrix.file.url }}" -O "${{ matrix.file.name }}.zip"; then
+            # 获取文件大小（字节）
             SIZE=$(stat -c%s "${{ matrix.file.name }}.zip")
+            # 转换为KB便于阅读
             SIZE_KB=$((SIZE / 1024))
+            # 计算文件SHA256哈希值
             SHA256=$(sha256sum "${{ matrix.file.name }}.zip" | awk '{print $1}')
             
             echo "下载成功 - 大小: ${SIZE_KB}KB - SHA256: ${SHA256} - IP: ${IP}"
             
-            # 保存IP信息到文件
+            # 将节点IP和文件信息保存到文件（格式：文件名|描述|IP|大小|SHA256）
             echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|${IP}|${SIZE_KB}KB|${SHA256}" > ip_info.txt
           else
+            # 下载失败时记录失败信息并退出
             echo "下载失败: ${{ matrix.file.name }}.zip"
             echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|FAILED|-|-" > ip_info.txt
             exit 1
           fi
       
+      # ----------------------------------------------------------
+      # 步骤2：上传下载的文件和IP信息为Artifact
+      # ----------------------------------------------------------
       - name: 上传文件到 Artifact
         uses: actions/upload-artifact@v4
         with:
+          # Artifact名称包含文件名，避免13个任务之间的冲突
           name: file-${{ matrix.file.name }}
+          # 上传zip文件和IP信息文件
           path: |
             ${{ matrix.file.name }}.zip
             ip_info.txt
+          # Artifact保留1天后自动删除（节省存储空间）
           retention-days: 1
 
+  # ============================================================
+  # 作业2：合并文件、收集IP、打包发布、发送通知
+  # 功能：等待所有13个下载任务完成后执行
+  #       1. 下载所有Artifact文件
+  #       2. 收集13个节点的IP信息
+  #       3. 整理文件到日期目录
+  #       4. 计算SHA256校验值
+  #       5. 打包为zip文件
+  #       6. 创建GitHub Release
+  #       7. 发送邮件和Telegram通知
+  # ============================================================
   merge-and-release:
+    # 等待所有下载任务完成
     needs: download-files
+    # 运行环境：Ubuntu最新版
     runs-on: ubuntu-latest
+    # 合并任务超时时间（30分钟）
     timeout-minutes: 30
     
+    # 环境变量配置（邮件和Telegram通知所需的密钥）
     env:
-      MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
-      MAIL_PORT: ${{ secrets.MAIL_PORT }}
-      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-      MAIL_TO: ${{ secrets.MAIL_TO }}
-      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}      # 邮件服务器地址（如 smtp.gmail.com）
+      MAIL_PORT: ${{ secrets.MAIL_PORT }}            # 邮件服务器端口（如 587）
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}    # 邮件账号用户名
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}    # 邮件账号密码或应用专用密码
+      MAIL_TO: ${{ secrets.MAIL_TO }}               # 邮件接收人地址
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}     # Telegram Bot的API Token
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}         # Telegram接收消息的Chat ID
     
     steps:
+      # ----------------------------------------------------------
+      # 步骤1：记录工作流开始时间
+      # ----------------------------------------------------------
       - name: 记录开始时间
         id: start_time
         run: |
+          # 记录Unix时间戳，用于计算总运行耗时
           echo "start=$(date -u +%s)" >> $GITHUB_OUTPUT
+          # 记录北京时间格式的开始时间
           echo "start_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
       
+      # ----------------------------------------------------------
+      # 步骤2：获取当前日期用于文件命名
+      # ----------------------------------------------------------
       - name: 获取当前日期
         id: date
         run: |
+          # 获取日期（格式：YYYY-MM-DD），用于目录和文件命名
           echo "date=$(TZ='Asia/Shanghai' date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          # 获取完整日期时间（格式：YYYY-MM-DD HH:MM:SS），用于日志显示
           echo "datetime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
       
+      # ----------------------------------------------------------
+      # 步骤3：检出仓库代码
+      # ----------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
       
+      # ----------------------------------------------------------
+      # 步骤4：下载所有分片Artifact文件
+      # ----------------------------------------------------------
       - name: 下载所有分片文件
         uses: actions/download-artifact@v4
         with:
+          # 下载到artifacts目录
           path: artifacts
+          # 匹配所有file-开头的Artifact（即13个下载任务上传的文件）
           pattern: file-*
       
+      # ----------------------------------------------------------
+      # 步骤5：收集所有节点IP信息并整理下载的文件
+      # ----------------------------------------------------------
       - name: 收集所有IP信息并整理文件
         id: collect_ips
         run: |
+          # 创建以日期命名的数据目录
           DATA_DIR="${{ steps.date.outputs.date }}"
           mkdir -p "$DATA_DIR"
           
-          # 初始化IP汇总变量
-          IP_LIST=""
-          IP_TABLE_HTML=""
-          IP_TABLE_MD="| 序号 | 文件名 | 描述 | 下载节点IP | 文件大小 | 状态 |\n|------|--------|------|------------|----------|------|\n"
-          counter=1
-          total_size=0
+          # 初始化变量
+          IP_LIST=""          # 逗号分隔的IP列表
+          IP_TABLE_HTML=""    # HTML格式的IP表格（用于邮件）
+          IP_TABLE_MD=""      # Markdown格式的IP表格（用于Release）
+          counter=1           # 文件计数器
+          total_size=0        # 总文件大小（KB）
+          
+          # 构建Markdown表格头
+          IP_TABLE_MD="| 序号 | 文件名 | 描述 | 下载节点IP | 文件大小 | 状态 |\n"
+          IP_TABLE_MD="${IP_TABLE_MD}|------|--------|------|------------|----------|------|\n"
           
           echo "============================================================"
           echo "  多IP并行下载 - IP汇总"
@@ -145,9 +246,10 @@ jobs:
           echo "  文件总数: 13"
           echo "------------------------------------------------------------"
           
+          # 遍历所有Artifact子目录
           for artifact_dir in artifacts/file-*/; do
             if [ -d "$artifact_dir" ]; then
-              # 移动zip文件
+              # 移动zip文件到日期目录
               for zip_file in "$artifact_dir"*.zip; do
                 if [ -f "$zip_file" ]; then
                   filename=$(basename "$zip_file")
@@ -156,27 +258,29 @@ jobs:
                 fi
               done
               
-              # 读取IP信息
+              # 读取该节点的IP信息文件
               if [ -f "$artifact_dir/ip_info.txt" ]; then
+                # 解析IP信息（格式：文件名|描述|IP|大小|SHA256）
                 IFS='|' read -r filename desc ip size sha256 < "$artifact_dir/ip_info.txt"
                 
+                # 格式化序号（01, 02, ...）
                 counter_str=$(printf "%2d" $counter)
                 echo "[$counter_str/13] $filename ($desc) - IP: $ip - 大小: $size"
                 
-                # Markdown表格行
+                # 构建Markdown表格行
                 IP_TABLE_MD="${IP_TABLE_MD}| $counter | $filename | $desc | $ip | $size | ✅ 成功 |\n"
                 
-                # HTML表格行（用于邮件）
+                # 构建HTML表格行（用于邮件通知）
                 IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td>$counter</td><td>$filename</td><td>$desc</td><td class=\"ip-highlight\">$ip</td><td>$size</td><td><span class=\"success-badge\">✅ 成功</span></td></tr>\n"
                 
-                # IP列表（逗号分隔）
+                # 构建逗号分隔的IP列表
                 if [ -n "$IP_LIST" ]; then
                   IP_LIST="${IP_LIST}, ${ip}"
                 else
                   IP_LIST="${ip}"
                 fi
                 
-                # 计算总大小
+                # 累加文件大小
                 size_num=$(echo "$size" | sed 's/KB//')
                 total_size=$((total_size + size_num))
                 
@@ -185,8 +289,10 @@ jobs:
             fi
           done
           
+          # 清理Artifact临时目录
           rm -rf artifacts
           
+          # 计算总大小（转换为MB）
           total_size_mb=$(echo "scale=2; $total_size / 1024" | bc)
           
           echo "------------------------------------------------------------"
@@ -194,74 +300,110 @@ jobs:
           echo "  总大小: ${total_size_mb}MB"
           echo "------------------------------------------------------------"
           
-          # 保存到文件供后续使用
-          echo "$IP_LIST" > ip_list.txt
-          echo -e "$IP_TABLE_MD" > ip_table_md.txt
-          echo -e "$IP_TABLE_HTML" > ip_table_html.txt
+          # 保存数据到文件，供后续步骤使用
+          echo "$IP_LIST" > ip_list.txt              # IP列表文件
+          echo -e "$IP_TABLE_MD" > ip_table_md.txt    # Markdown表格文件
+          echo -e "$IP_TABLE_HTML" > ip_table_html.txt # HTML表格文件
           
+          # 将数据输出到GITHUB_OUTPUT，供后续步骤引用
           echo "ip_list=${IP_LIST}" >> $GITHUB_OUTPUT
           echo "total_size=${total_size_mb}MB" >> $GITHUB_OUTPUT
           
-          # 检查文件数量
+          # 统计成功下载的文件数量
           file_count=$(ls "$DATA_DIR"/*.zip 2>/dev/null | wc -l)
           echo "file_count=${file_count}" >> $GITHUB_OUTPUT
           
+          # 如果没有找到任何zip文件，报错退出
           if [ "$file_count" -eq 0 ]; then
             echo "错误：没有找到任何zip文件！"
             exit 1
           fi
       
+      # ----------------------------------------------------------
+      # 步骤6：计算所有zip文件的SHA256校验值
+      # ----------------------------------------------------------
       - name: 计算 SHA256 校验值
         run: |
+          # 切换到日期目录
           DATA_DIR="${{ steps.date.outputs.date }}"
           cd "$DATA_DIR"
           
+          # 创建SHA256校验文件头
           echo "# SHA256 校验值" > SHA256SUMS.txt
           echo "# 生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
           
+          # 遍历所有zip文件计算SHA256
           for file in *.zip; do
             if [ -f "$file" ]; then
+              # 计算SHA256哈希值
               sha256=$(sha256sum "$file" | awk '{print $1}')
+              # 获取文件大小（字节）
               size=$(stat -c%s "$file")
+              # 转换为MB便于阅读
               size_mb=$(echo "scale=2; $size / 1048576" | bc)
+              # 写入校验文件
               echo "$sha256  $file" >> SHA256SUMS.txt
               echo "✅ $file: ${size_mb}MB"
             fi
           done
       
+      # ----------------------------------------------------------
+      # 步骤7：将所有文件打包为一个zip文件
+      # ----------------------------------------------------------
       - name: 打包数据文件
         run: |
+          # 定义目录名和打包文件名
           DATA_DIR="${{ steps.date.outputs.date }}"
           ZIP_NAME="${DATA_DIR}.zip"
+          
+          # 进入数据目录，打包所有文件
+          # -0 参数表示仅存储不压缩（zip文件本身已压缩）
           cd "$DATA_DIR"
           zip -0 -r "../${ZIP_NAME}" .
           cd ..
+          
+          # 显示打包结果
           echo "打包完成:"
           ls -lh "$ZIP_NAME"
       
+      # ----------------------------------------------------------
+      # 步骤8：计算工作流总运行时间
+      # ----------------------------------------------------------
       - name: 计算运行时间
         id: run_time
         run: |
+          # 计算结束时间戳
           end=$(date -u +%s)
           start=${{ steps.start_time.outputs.start }}
+          # 计算总耗时（秒）
           duration=$((end - start))
           minutes=$((duration / 60))
           seconds=$((duration % 60))
+          
+          # 输出结束时间和耗时
           echo "end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
           echo "duration=${minutes}分${seconds}秒" >> $GITHUB_OUTPUT
       
+      # ----------------------------------------------------------
+      # 步骤9：获取汇总服务器的公网IP
+      # ----------------------------------------------------------
       - name: 获取汇总服务器IP
         run: |
+          # 获取当前运行环境的公网IP（汇总job的IP）
           MERGE_IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
           echo "MERGE_IP=${MERGE_IP}" >> $GITHUB_ENV
       
+      # ----------------------------------------------------------
+      # 步骤10：构建Release说明文档
+      # ----------------------------------------------------------
       - name: 构建 Release Body
         id: build_body
         run: |
+          # 读取Markdown格式的IP表格
           IP_TABLE_MD=$(cat ip_table_md.txt)
           
-          # 写入文件避免YAML多行问题
+          # 将Release说明写入文件（避免YAML多行字符串问题）
           cat > release_body.md << RELEASE_EOF
           ## 📊 通达信数据下载（多IP并行）
           
@@ -297,57 +439,104 @@ jobs:
           | ggtday.zip | 港股通日线 | ✓ |
           
           ### 🔐 校验文件
-          - SHA256SUMS.txt
+          - SHA256SUMS.txt - 包含所有文件的SHA256校验值
+          
+          ### 📥 使用方法
+          **1. 下载数据包:**
+          \`\`\`bash
+          wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.date.outputs.date }}/${{ steps.date.outputs.date }}.zip
+          \`\`\`
+          
+          **2. 验证文件完整性:**
+          \`\`\`bash
+          sha256sum -c SHA256SUMS.txt
+          \`\`\`
+          
+          **3. 解压数据:**
+          \`\`\`bash
+          unzip ${{ steps.date.outputs.date }}.zip -d ${{ steps.date.outputs.date }}
+          \`\`\`
           
           ---
-          *由 GitHub Actions 自动生成 | 多IP并行下载*
+          *由 GitHub Actions 自动生成 | 多IP并行下载模式 | 13个独立节点*
           RELEASE_EOF
       
+      # ----------------------------------------------------------
+      # 步骤11：创建GitHub Release并上传文件
+      # ----------------------------------------------------------
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
+          # Release标签名（使用日期作为版本号）
           tag_name: v${{ steps.date.outputs.date }}
+          # Release标题
           name: 通达信数据 - ${{ steps.date.outputs.date }}
+          # 使用文件内容作为Release说明（避免YAML多行问题）
           body_path: release_body.md
+          # 要上传到Release的文件列表
           files: |
             ${{ steps.date.outputs.date }}.zip
             ${{ steps.date.outputs.date }}/SHA256SUMS.txt
+          # 设置为正式发布（非草稿）
           draft: false
+          # 设置为正式版（非预发布）
           prerelease: false
         env:
+          # GitHub Token用于认证
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
+      # ----------------------------------------------------------
+      # 步骤12：发送邮件通知（包含所有13个节点IP）
+      # ----------------------------------------------------------
       - name: 发送邮件通知
+        # 仅在邮件配置完整时执行
         if: env.MAIL_ADDRESS && env.MAIL_USERNAME && env.MAIL_PASSWORD
         uses: dawidd6/action-send-mail@v3
         with:
+          # 邮件服务器配置
           server_address: ${{ env.MAIL_ADDRESS }}
           server_port: ${{ env.MAIL_PORT }}
           username: ${{ env.MAIL_USERNAME }}
           password: ${{ env.MAIL_PASSWORD }}
+          # 邮件主题（包含日期）
           subject: 📊 通达信数据下载完成 - ${{ steps.date.outputs.date }}
+          # 邮件接收人
           to: ${{ env.MAIL_TO }}
+          # 发件人名称
           from: 通达信数据自动下载
+          # HTML格式的邮件正文（包含完整的IP表格）
           html_body: |
             <!DOCTYPE html>
             <html>
             <head>
             <style>
+              /* 页面基础样式 */
               body { font-family: 'Microsoft YaHei', Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+              /* 邮件容器 */
               .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+              /* 顶部标题栏 */
               .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px 10px 0 0; text-align: center; }
+              /* 内容区域 */
               .content { padding: 30px; }
+              /* 各区块 */
               .section { margin-bottom: 30px; }
+              /* 区块标题 */
               .section h2 { color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px; }
+              /* 信息表格 */
               .info-table { width: 100%; border-collapse: collapse; }
               .info-table td { padding: 8px 12px; border-bottom: 1px solid #eee; }
               .info-table td:first-child { font-weight: bold; color: #666; width: 120px; }
+              /* IP表格 */
               .ip-table { width: 100%; border-collapse: collapse; background: #f8f9fa; border-radius: 5px; }
               .ip-table th { background: #667eea; color: white; padding: 12px; text-align: left; }
               .ip-table td { padding: 10px 12px; border-bottom: 1px solid #e0e0e0; }
+              /* IP地址高亮 */
               .ip-highlight { color: #667eea; font-weight: bold; font-family: monospace; }
+              /* 成功标签 */
               .success-badge { background: #4caf50; color: white; padding: 3px 8px; border-radius: 3px; font-size: 12px; }
+              /* 页脚 */
               .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; border-top: 1px solid #eee; }
+              /* 统计卡片 */
               .stats { display: flex; justify-content: space-around; margin: 20px 0; }
               .stat-item { text-align: center; padding: 15px; background: #f8f9fa; border-radius: 5px; flex: 1; margin: 0 5px; }
               .stat-value { font-size: 28px; font-weight: bold; color: #667eea; }
@@ -356,16 +545,29 @@ jobs:
             </head>
             <body>
             <div class="container">
+            <!-- 顶部标题 -->
             <div class="header">
               <h1>📊 通达信数据下载完成</h1>
               <p>多IP并行下载模式 | 13个独立节点</p>
             </div>
             <div class="content">
+              <!-- 统计概览 -->
               <div class="stats">
-                <div class="stat-item"><div class="stat-value">13</div><div class="stat-label">下载节点数</div></div>
-                <div class="stat-item"><div class="stat-value">${{ steps.run_time.outputs.duration }}</div><div class="stat-label">运行耗时</div></div>
-                <div class="stat-item"><div class="stat-value">${{ steps.collect_ips.outputs.total_size }}</div><div class="stat-label">总大小</div></div>
+                <div class="stat-item">
+                  <div class="stat-value">13</div>
+                  <div class="stat-label">下载节点数</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-value">${{ steps.run_time.outputs.duration }}</div>
+                  <div class="stat-label">运行耗时</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-value">${{ steps.collect_ips.outputs.total_size }}</div>
+                  <div class="stat-label">总大小</div>
+                </div>
               </div>
+              
+              <!-- 执行信息 -->
               <div class="section">
                 <h2>⏱️ 执行信息</h2>
                 <table class="info-table">
@@ -378,30 +580,50 @@ jobs:
                   <tr><td>所有节点IP</td><td class="ip-highlight">${{ steps.collect_ips.outputs.ip_list }}</td></tr>
                 </table>
               </div>
+              
+              <!-- 13个下载节点IP列表 -->
               <div class="section">
-                <h2>🌐 下载节点IP列表</h2>
+                <h2>🌐 下载节点IP列表（全部13个独立IP）</h2>
                 <table class="ip-table">
-                  <tr><th>序号</th><th>文件名</th><th>描述</th><th>节点IP</th><th>大小</th><th>状态</th></tr>
+                  <tr>
+                    <th>序号</th>
+                    <th>文件名</th>
+                    <th>描述</th>
+                    <th>节点IP</th>
+                    <th>大小</th>
+                    <th>状态</th>
+                  </tr>
                   ${{ steps.collect_ips.outputs.ip_table_html }}
                 </table>
               </div>
+              
+              <!-- 下载链接 -->
               <div class="section">
                 <h2>🔗 下载链接</h2>
-                <a href="https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}" style="color: #667eea; font-weight: bold;">
+                <a href="https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}" 
+                   style="color: #667eea; font-weight: bold;">
                   📦 https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}
                 </a>
               </div>
             </div>
+            <!-- 页脚 -->
             <div class="footer">
               <p>由 GitHub Actions 自动生成 | 多IP并行下载模式</p>
+              <p>数据来源：通达信官网 | 下载节点：13个独立IP</p>
             </div>
             </div>
             </body>
             </html>
       
+      # ----------------------------------------------------------
+      # 步骤13：发送Telegram通知（包含IP信息摘要）
+      # 安全注意：禁止在日志中输出Telegram API返回的敏感信息
+      # ----------------------------------------------------------
       - name: 发送 Telegram 通知
+        # 仅在Telegram配置完整时执行
         if: env.TG_BOT_TOKEN && env.TG_CHAT_ID
         run: |
+          # 构建Telegram通知消息
           MESSAGE="📊 通达信数据下载完成
           
           日期: ${{ steps.date.outputs.date }}
@@ -413,6 +635,17 @@ jobs:
           
           🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}"
           
-          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+          # 调用Telegram API发送消息
+          # 使用 -o /dev/null 丢弃响应内容，避免泄露敏感信息
+          # 使用 -w 只输出HTTP状态码
+          # 注意：API返回的JSON中包含chat信息、message_id等敏感数据，绝不能输出到日志
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT_ID}" \
-            -d text="$MESSAGE"
+            -d text="$MESSAGE")
+          
+          # 根据HTTP状态码判断发送结果，只输出成功/失败状态
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Telegram通知发送成功 (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ Telegram通知发送失败 (HTTP $HTTP_CODE)"
+          fi
