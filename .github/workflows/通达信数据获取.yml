@@ -1,158 +1,204 @@
 # ============================================================
-# 工作流名称：下载通达信数据（每周五）
+# 工作流名称：下载通达信数据（每周五）- 多IP并行版
 # 功能描述：每周五北京时间22:00自动下载通达信官网的13个数据文件
-#          计算SHA256校验值，打包为zip并发布到GitHub Releases
-#          数据发布完成后发送邮件和Telegram通知（通知失败不影响发布）
+#          使用矩阵策略实现多IP并行下载，每个文件一个独立IP
+#          下载完成后合并文件、计算SHA256、打包发布
 # 作者：QuantumEdgecode & Deepseek-V4-Flash & 江城庄稼汉
 # 更新时间：2026-05-18
 # ============================================================
 
-name: 下载通达信数据（每周五）
+name: 下载通达信数据（每周五）- 多IP并行
 
-# ============================================================
-# 触发条件配置
-# ============================================================
 on:
-  # 定时触发：每周五北京时间22:00执行
-  # cron表达式：分 时 日 月 周
-  # UTC 14:00 = 北京时间 22:00 (UTC+8)
   schedule:
     - cron: '0 14 * * 5'
-  
-  # 手动触发：允许在GitHub Actions页面手动运行
   workflow_dispatch:
 
-# ============================================================
-# 全局权限配置
-# 解决"Resource not accessible by integration"权限错误
-# ============================================================
 permissions:
-  contents: write  # 允许创建和上传Release资源
-  actions: read    # 允许读取工作流运行信息
+  contents: write
+  actions: read
 
-# ============================================================
-# 作业定义
-# ============================================================
 jobs:
-  # 作业名称：下载并发布
-  download-and-release:
-    # 运行环境：使用最新版Ubuntu系统
+  # ============================================================
+  # 作业1：多IP并行下载（矩阵策略）
+  # ============================================================
+  download-files:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     
-    # 超时设置：2小时（120分钟），防止网络问题导致死循环
-    # 超时后自动终止作业并标记为失败
-    timeout-minutes: 120
+    # 矩阵策略：每个文件一个独立job，获得独立IP
+    strategy:
+      fail-fast: false  # 单个文件失败不影响其他文件
+      max-parallel: 13  # 最大并行数（GitHub免费版限制20）
+      matrix:
+        file:
+          - name: shlday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/shlday.zip
+            desc: 沪市日线数据
+          - name: szlday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/szlday.zip
+            desc: 深市日线数据
+          - name: bjlday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/bjlday.zip
+            desc: 北交所日线数据
+          - name: tdxzs_day
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/tdxzs_day.zip
+            desc: 通达信指数日线
+          - name: shzsday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/shzsday.zip
+            desc: 沪市指数日线
+          - name: szzsday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/szzsday.zip
+            desc: 深市指数日线
+          - name: shlday_4
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/shlday_4.zip
+            desc: 沪市日线(4位代码)
+          - name: szlday_4
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/szlday_4.zip
+            desc: 深市日线(4位代码)
+          - name: shqqday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/shqqday.zip
+            desc: 沪市全权日线
+          - name: szqqday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/szqqday.zip
+            desc: 深市全权日线
+          - name: xsbday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/xsbday.zip
+            desc: 新三板日线
+          - name: 62day
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/62day.zip
+            desc: 62板块日线
+          - name: ggtday
+            url: https://www.tdx.com.cn/products/data/data/vipdoc/ggtday.zip
+            desc: 港股通日线
     
-    # ============================================================
-    # 环境变量配置（作业级别）
-    # 邮件和Telegram相关配置从 GitHub Secrets 读取
-    # ============================================================
+    steps:
+      - name: 下载 ${{ matrix.file.desc }}
+        id: download
+        run: |
+          # 获取本机IP
+          IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
+          echo "📡 下载节点 IP: $IP"
+          echo "📥 正在下载: ${{ matrix.file.name }}.zip (${{ matrix.file.desc }})"
+          
+          # 下载文件
+          if wget --timeout=30 --tries=3 -q "${{ matrix.file.url }}" -O "${{ matrix.file.name }}.zip"; then
+            # 计算文件信息
+            SIZE=$(stat -c%s "${{ matrix.file.name }}.zip")
+            SIZE_KB=$((SIZE / 1024))
+            SHA256=$(sha256sum "${{ matrix.file.name }}.zip" | awk '{print $1}')
+            
+            echo "✅ 下载成功"
+            echo "   文件大小: ${SIZE_KB}KB"
+            echo "   SHA256: ${SHA256}"
+            echo "   下载IP: ${IP}"
+            
+            # 保存下载信息到文件（用于后续汇总）
+            echo "download_ip=${IP}" >> download_info.txt
+            echo "download_size=${SIZE}" >> download_info.txt
+            echo "download_sha256=${SHA256}" >> download_info.txt
+          else
+            echo "❌ 下载失败: ${{ matrix.file.name }}.zip"
+            exit 1
+          fi
+      
+      # 上传下载的文件作为artifact（用于job间传递）
+      - name: 上传文件到 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-${{ matrix.file.name }}
+          path: |
+            ${{ matrix.file.name }}.zip
+            download_info.txt
+          retention-days: 1  # 只保留1天
+
+  # ============================================================
+  # 作业2：合并文件并打包发布
+  # 等待所有下载任务完成后执行
+  # ============================================================
+  merge-and-release:
+    needs: download-files  # 等待所有下载完成
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
     env:
-      # ===== 邮件配置 =====
       MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
       MAIL_PORT: ${{ secrets.MAIL_PORT }}
       MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
       MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
       MAIL_TO: ${{ secrets.MAIL_TO }}
-      
-      # ===== Telegram 配置 =====
       TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
       TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-      
-      # ===== 日期变量（北京时间） =====
-      TODAY_DATE: $(TZ='Asia/Shanghai' date +%Y-%m-%d)
     
-    # ============================================================
-    # 执行步骤
-    # ============================================================
     steps:
-      # ----------------------------------------------------------
-      # 步骤1：记录工作流开始时间
-      # ----------------------------------------------------------
       - name: 记录开始时间
         id: start_time
         run: |
           echo "start=$(date -u +%s)" >> $GITHUB_OUTPUT
           echo "start_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
-          echo "开始执行时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间"
       
-      # ----------------------------------------------------------
-      # 步骤2：检出仓库代码
-      # ----------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      # ----------------------------------------------------------
-      # 步骤3：获取当前日期（北京时间）
-      # ----------------------------------------------------------
       - name: 获取当前日期
         id: date
         run: |
           echo "date=$(TZ='Asia/Shanghai' date +%Y-%m-%d)" >> $GITHUB_OUTPUT
           echo "datetime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
-          echo "当前日期: ${{ steps.date.outputs.date }}"
       
-      # ----------------------------------------------------------
-      # 步骤4：创建日期命名的数据存储目录
-      # 目录名格式：YYYY-MM-DD
-      # ----------------------------------------------------------
-      - name: 创建数据目录
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # 下载所有artifact文件
+      - name: 下载所有分片文件
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded_files
+          pattern: file-*
+          merge-multiple: true
+      
+      # 整理文件到日期目录
+      - name: 整理文件到日期目录
         run: |
           DATA_DIR="${{ steps.date.outputs.date }}"
           mkdir -p "$DATA_DIR"
-          echo "数据目录已创建: $DATA_DIR/"
-      
-      # ----------------------------------------------------------
-      # 步骤5：下载通达信数据文件
-      # ----------------------------------------------------------
-      - name: 下载通达信数据文件
-        run: |
-          DATA_DIR="${{ steps.date.outputs.date }}"
-          cd "$DATA_DIR"
           
-          urls=(
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/bjlday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/tdxzs_day.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shzsday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szzsday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shlday_4.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szlday_4.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/shqqday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/szqqday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/xsbday.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/62day.zip"
-            "https://www.tdx.com.cn/products/data/data/vipdoc/ggtday.zip"
-          )
+          echo "📁 正在整理下载的文件到 $DATA_DIR/ ..."
           
-          for url in "${urls[@]}"; do
-            filename=$(basename "$url")
-            echo "正在下载: $filename..."
-            wget --timeout=30 --tries=3 -q "$url" -O "$filename" && echo "✓ $filename 下载成功" || echo "✗ $filename 下载失败"
+          # 移动所有zip文件到日期目录
+          mv *.zip "$DATA_DIR/" 2>/dev/null || true
+          
+          # 收集所有下载信息
+          echo "# 多IP下载节点信息" > "$DATA_DIR/download_nodes.txt"
+          echo "# 生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> "$DATA_DIR/download_nodes.txt"
+          echo "" >> "$DATA_DIR/download_nodes.txt"
+          
+          for info_file in download_info.txt; do
+            if [ -f "$info_file" ]; then
+              cat "$info_file" >> "$DATA_DIR/download_nodes.txt"
+              echo "---" >> "$DATA_DIR/download_nodes.txt"
+              rm "$info_file"
+            fi
           done
+          
+          # 列出目录内容
+          echo ""
+          echo "📋 目录内容:"
+          ls -lh "$DATA_DIR/"
       
-      # ----------------------------------------------------------
-      # 步骤6：计算SHA256校验值
-      # ----------------------------------------------------------
+      # 计算SHA256校验值
       - name: 计算 SHA256 校验值
         run: |
           DATA_DIR="${{ steps.date.outputs.date }}"
           cd "$DATA_DIR"
           
-          echo "正在计算 SHA256 校验值..."
-          echo ""
+          echo "🔐 正在计算 SHA256 校验值..."
           
-          # 文本格式校验文件
+          # 文本格式
           echo "# SHA256 校验值" > SHA256SUMS.txt
           echo "# 生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间" >> SHA256SUMS.txt
-          echo "# 验证命令: sha256sum -c SHA256SUMS.txt" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
           
-          # JSON格式校验文件
+          # JSON格式
           echo "{" > checksums.json
           echo "  \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> checksums.json
-          echo "  \"generated_at_beijing\": \"$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')\"," >> checksums.json
           echo "  \"files\": {" >> checksums.json
           
           first=true
@@ -171,7 +217,7 @@ jobs:
               fi
               echo -n "    \"$file\": {\"sha256\": \"$sha256\", \"size\": $size, \"size_kb\": $size_kb}" >> checksums.json
               
-              echo "✓ $file: $sha256 (${size_kb}KB)"
+              echo "✅ $file: ${size_kb}KB"
             fi
           done
           
@@ -180,39 +226,24 @@ jobs:
           echo "}" >> checksums.json
           
           echo ""
-          echo "SHA256 校验值计算完成！"
+          echo "✅ SHA256 校验值计算完成！"
       
-      # ----------------------------------------------------------
-      # 步骤7：打包为 ZIP（仅存储，不压缩）
-      # 将日期目录下的所有文件打包为 YYYY-MM-DD.zip
-      # 使用 -0 参数：仅存储不压缩，打包速度快
-      # ----------------------------------------------------------
+      # 打包为ZIP（仅存储）
       - name: 打包数据文件
         run: |
           DATA_DIR="${{ steps.date.outputs.date }}"
           ZIP_NAME="${DATA_DIR}.zip"
           
-          echo "正在打包数据文件..."
-          echo "源目录: $DATA_DIR/"
-          echo "目标文件: $ZIP_NAME"
+          echo "📦 正在打包: $ZIP_NAME"
           
-          # 进入日期目录，打包所有文件
-          # -0: 仅存储不压缩 (store only, no compression)
-          # -r: 递归包含子目录
-          # -q: 静默模式
           cd "$DATA_DIR"
           zip -0 -r "../${ZIP_NAME}" .
           cd ..
           
-          # 显示打包结果
-          echo ""
-          echo "打包完成！"
-          echo "文件信息:"
+          echo "✅ 打包完成:"
           ls -lh "$ZIP_NAME"
       
-      # ----------------------------------------------------------
-      # 步骤8：计算工作流运行时间
-      # ----------------------------------------------------------
+      # 计算运行时间
       - name: 计算运行时间
         id: run_time
         run: |
@@ -224,31 +255,23 @@ jobs:
           
           echo "end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
           echo "duration=${minutes}分${seconds}秒" >> $GITHUB_OUTPUT
-          echo "duration_seconds=${duration}" >> $GITHUB_OUTPUT
-          
-          echo "结束时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间"
-          echo "总运行时间: ${minutes} 分 ${seconds} 秒"
       
-      # ----------------------------------------------------------
-      # 步骤9：获取服务器IP
-      # ----------------------------------------------------------
-      - name: 获取服务器IP
+      # 获取汇总IP（用于通知）
+      - name: 获取汇总服务器IP
         run: |
           set +x
-          echo "IP_ADDRESS=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')" >> $GITHUB_ENV
+          echo "MERGE_IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')" >> $GITHUB_ENV
           set -x
       
-      # ----------------------------------------------------------
-      # 步骤10：创建GitHub Release并上传ZIP文件
-      # ----------------------------------------------------------
-      - name: 创建 Release 并上传数据文件
+      # 创建Release
+      - name: 创建 Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.date.outputs.date }}
           name: 通达信数据 - ${{ steps.date.outputs.date }}
           body: |
-            ## 📊 通达信数据下载
+            ## 📊 通达信数据下载（多IP并行）
             
             ### ⏱️ 执行信息
             | 项目 | 时间 |
@@ -256,11 +279,11 @@ jobs:
             | **开始时间** | ${{ steps.start_time.outputs.start_time }} (北京时间) |
             | **结束时间** | ${{ steps.run_time.outputs.end_time }} (北京时间) |
             | **运行耗时** | ${{ steps.run_time.outputs.duration }} |
+            | **下载模式** | 🌐 多IP并行（13个独立IP） |
+            | **汇总IP** | ${{ env.MERGE_IP }} |
             
-            **下载时间**: ${{ steps.date.outputs.datetime }} (北京时间周五)
-            
-            ### 📦 数据包
-            下载后解压即可获得完整数据文件（包含SHA256校验文件）
+            ### 📦 数据包说明
+            使用13个独立IP并行下载，每个文件一个IP，避免单IP限流
             
             **解压命令:**
             ```bash
