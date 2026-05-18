@@ -31,11 +31,41 @@ permissions:
 
 jobs:
   # ============================================================
+  # 作业0：记录工作流开始时间（所有job之前执行）
+  # 功能：记录整个工作流的开始时间戳，用于计算总运行时间
+  # ============================================================
+  record-start-time:
+    runs-on: ubuntu-latest
+    # 不需要超时设置，此job很快完成
+    outputs:
+      # 输出工作流开始时间戳（Unix秒），供后续job使用
+      workflow_start: ${{ steps.set_start.outputs.workflow_start }}
+      # 输出工作流开始时间（北京时间格式），用于显示
+      workflow_start_time: ${{ steps.set_start.outputs.workflow_start_time }}
+    steps:
+      - name: 记录工作流开始时间
+        id: set_start
+        run: |
+          # 获取当前Unix时间戳（秒）
+          WORKFLOW_START=$(date -u +%s)
+          # 获取北京时间格式的开始时间
+          WORKFLOW_START_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
+          
+          echo "工作流开始时间戳: $WORKFLOW_START"
+          echo "工作流开始时间: $WORKFLOW_START_TIME (北京时间)"
+          
+          # 输出到GITHUB_OUTPUT，供后续job引用
+          echo "workflow_start=${WORKFLOW_START}" >> $GITHUB_OUTPUT
+          echo "workflow_start_time=${WORKFLOW_START_TIME}" >> $GITHUB_OUTPUT
+
+  # ============================================================
   # 作业1：多IP并行下载（矩阵策略）
   # 功能：使用矩阵策略创建13个独立job，每个job使用独立IP下载一个文件
   # 输出：下载的zip文件 + 节点IP信息（通过Artifact传递给后续job）
   # ============================================================
   download-files:
+    # 需要等待记录开始时间的job完成
+    needs: record-start-time
     # 运行环境：Ubuntu最新版
     runs-on: ubuntu-latest
     # 单个下载任务超时时间（30分钟）
@@ -110,6 +140,9 @@ jobs:
       # ----------------------------------------------------------
       - name: 下载 ${{ matrix.file.desc }}
         run: |
+          # 记录本节点开始下载时间
+          NODE_START=$(date -u +%s)
+          
           # 获取当前下载节点的公网IP地址
           IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
           echo "下载节点 IP: $IP"
@@ -117,6 +150,11 @@ jobs:
           
           # 使用wget下载文件，设置超时30秒，最多重试3次
           if wget --timeout=30 --tries=3 -q "${{ matrix.file.url }}" -O "${{ matrix.file.name }}.zip"; then
+            # 记录本节点结束下载时间
+            NODE_END=$(date -u +%s)
+            # 计算本节点下载耗时（秒）
+            NODE_DURATION=$((NODE_END - NODE_START))
+            
             # 获取文件大小（字节）
             SIZE=$(stat -c%s "${{ matrix.file.name }}.zip")
             # 转换为KB便于阅读
@@ -124,14 +162,14 @@ jobs:
             # 计算文件SHA256哈希值
             SHA256=$(sha256sum "${{ matrix.file.name }}.zip" | awk '{print $1}')
             
-            echo "下载成功 - 大小: ${SIZE_KB}KB - SHA256: ${SHA256} - IP: ${IP}"
+            echo "下载成功 - 大小: ${SIZE_KB}KB - 耗时: ${NODE_DURATION}秒 - IP: ${IP}"
             
-            # 将节点IP和文件信息保存到文件（格式：文件名|描述|IP|大小|SHA256）
-            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|${IP}|${SIZE_KB}KB|${SHA256}" > ip_info.txt
+            # 将节点信息保存到文件（格式：文件名|描述|IP|大小|SHA256|节点耗时）
+            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|${IP}|${SIZE_KB}KB|${SHA256}|${NODE_DURATION}秒" > ip_info.txt
           else
             # 下载失败时记录失败信息并退出
             echo "下载失败: ${{ matrix.file.name }}.zip"
-            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|FAILED|-|-" > ip_info.txt
+            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|FAILED|-|-|0秒" > ip_info.txt
             exit 1
           fi
       
@@ -154,16 +192,17 @@ jobs:
   # 作业2：合并文件、收集IP、打包发布、发送通知
   # 功能：等待所有13个下载任务完成后执行
   #       1. 下载所有Artifact文件
-  #       2. 收集13个节点的IP信息
+  #       2. 收集13个节点的IP信息和节点耗时
   #       3. 整理文件到日期目录
   #       4. 计算SHA256校验值
   #       5. 打包为zip文件
-  #       6. 创建GitHub Release
-  #       7. 发送邮件和Telegram通知
+  #       6. 计算工作流总运行时间
+  #       7. 创建GitHub Release
+  #       8. 发送邮件和Telegram通知
   # ============================================================
   merge-and-release:
-    # 等待所有下载任务完成
-    needs: download-files
+    # 需要等待记录开始时间和所有下载任务完成
+    needs: [record-start-time, download-files]
     # 运行环境：Ubuntu最新版
     runs-on: ubuntu-latest
     # 合并任务超时时间（30分钟）
@@ -181,15 +220,13 @@ jobs:
     
     steps:
       # ----------------------------------------------------------
-      # 步骤1：记录工作流开始时间
+      # 步骤1：获取工作流开始时间（从record-start-time job继承）
       # ----------------------------------------------------------
-      - name: 记录开始时间
+      - name: 获取工作流开始时间
         id: start_time
         run: |
-          # 记录Unix时间戳，用于计算总运行耗时
-          echo "start=$(date -u +%s)" >> $GITHUB_OUTPUT
-          # 记录北京时间格式的开始时间
-          echo "start_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          echo "工作流开始时间戳: ${{ needs.record-start-time.outputs.workflow_start }}"
+          echo "工作流开始时间: ${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间)"
       
       # ----------------------------------------------------------
       # 步骤2：获取当前日期用于文件命名
@@ -220,7 +257,7 @@ jobs:
           pattern: file-*
       
       # ----------------------------------------------------------
-      # 步骤5：收集所有节点IP信息并整理下载的文件
+      # 步骤5：收集所有节点IP信息、节点耗时，并整理下载的文件
       # ----------------------------------------------------------
       - name: 收集所有IP信息并整理文件
         id: collect_ips
@@ -235,13 +272,15 @@ jobs:
           IP_TABLE_MD=""      # Markdown格式的IP表格（用于Release）
           counter=1           # 文件计数器
           total_size=0        # 总文件大小（KB）
+          total_node_duration=0  # 所有节点耗时总和（秒），用于参考
+          max_node_duration=0    # 最长节点耗时（秒），用于估算并行总时间
           
           # 构建Markdown表格头
-          IP_TABLE_MD="| 序号 | 文件名 | 描述 | 下载节点IP | 文件大小 | 状态 |\n"
-          IP_TABLE_MD="${IP_TABLE_MD}|------|--------|------|------------|----------|------|\n"
+          IP_TABLE_MD="| 序号 | 文件名 | 描述 | 下载节点IP | 文件大小 | 节点耗时 | 状态 |\n"
+          IP_TABLE_MD="${IP_TABLE_MD}|------|--------|------|------------|----------|----------|------|\n"
           
           echo "============================================================"
-          echo "  多IP并行下载 - IP汇总"
+          echo "  多IP并行下载 - IP汇总与节点耗时统计"
           echo "============================================================"
           echo "  文件总数: 13"
           echo "------------------------------------------------------------"
@@ -260,18 +299,22 @@ jobs:
               
               # 读取该节点的IP信息文件
               if [ -f "$artifact_dir/ip_info.txt" ]; then
-                # 解析IP信息（格式：文件名|描述|IP|大小|SHA256）
-                IFS='|' read -r filename desc ip size sha256 < "$artifact_dir/ip_info.txt"
+                # 解析IP信息（格式：文件名|描述|IP|大小|SHA256|节点耗时）
+                IFS='|' read -r filename desc ip size sha256 node_duration < "$artifact_dir/ip_info.txt"
+                
+                # 提取节点耗时数字（去掉"秒"字）
+                node_sec=$(echo "$node_duration" | sed 's/秒//')
                 
                 # 格式化序号（01, 02, ...）
                 counter_str=$(printf "%2d" $counter)
-                echo "[$counter_str/13] $filename ($desc) - IP: $ip - 大小: $size"
+                echo "[$counter_str/13] $filename ($desc)"
+                echo "          IP: $ip | 大小: $size | 节点耗时: $node_duration"
                 
                 # 构建Markdown表格行
-                IP_TABLE_MD="${IP_TABLE_MD}| $counter | $filename | $desc | $ip | $size | ✅ 成功 |\n"
+                IP_TABLE_MD="${IP_TABLE_MD}| $counter | $filename | $desc | $ip | $size | $node_duration | ✅ 成功 |\n"
                 
                 # 构建HTML表格行（用于邮件通知）
-                IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td>$counter</td><td>$filename</td><td>$desc</td><td class=\"ip-highlight\">$ip</td><td>$size</td><td><span class=\"success-badge\">✅ 成功</span></td></tr>\n"
+                IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td>$counter</td><td>$filename</td><td>$desc</td><td class=\"ip-highlight\">$ip</td><td>$size</td><td>$node_duration</td><td><span class=\"success-badge\">✅ 成功</span></td></tr>\n"
                 
                 # 构建逗号分隔的IP列表
                 if [ -n "$IP_LIST" ]; then
@@ -283,6 +326,14 @@ jobs:
                 # 累加文件大小
                 size_num=$(echo "$size" | sed 's/KB//')
                 total_size=$((total_size + size_num))
+                
+                # 累加节点耗时（用于参考）
+                total_node_duration=$((total_node_duration + node_sec))
+                
+                # 记录最长节点耗时（用于估算并行总时间）
+                if [ "$node_sec" -gt "$max_node_duration" ]; then
+                  max_node_duration=$node_sec
+                fi
                 
                 counter=$((counter + 1))
               fi
@@ -298,6 +349,8 @@ jobs:
           echo "------------------------------------------------------------"
           echo "  所有13个下载节点IP: $IP_LIST"
           echo "  总大小: ${total_size_mb}MB"
+          echo "  节点耗时总和(串行参考): ${total_node_duration}秒"
+          echo "  最长节点耗时(并行参考): ${max_node_duration}秒"
           echo "------------------------------------------------------------"
           
           # 保存数据到文件，供后续步骤使用
@@ -308,6 +361,8 @@ jobs:
           # 将数据输出到GITHUB_OUTPUT，供后续步骤引用
           echo "ip_list=${IP_LIST}" >> $GITHUB_OUTPUT
           echo "total_size=${total_size_mb}MB" >> $GITHUB_OUTPUT
+          echo "total_node_duration=${total_node_duration}" >> $GITHUB_OUTPUT
+          echo "max_node_duration=${max_node_duration}" >> $GITHUB_OUTPUT
           
           # 统计成功下载的文件数量
           file_count=$(ls "$DATA_DIR"/*.zip 2>/dev/null | wc -l)
@@ -368,22 +423,46 @@ jobs:
           ls -lh "$ZIP_NAME"
       
       # ----------------------------------------------------------
-      # 步骤8：计算工作流总运行时间
+      # 步骤8：计算工作流总运行时间（从第一个job开始到当前时间）
       # ----------------------------------------------------------
-      - name: 计算运行时间
+      - name: 计算工作流总运行时间
         id: run_time
         run: |
-          # 计算结束时间戳
+          # 获取当前时间戳
           end=$(date -u +%s)
-          start=${{ steps.start_time.outputs.start }}
-          # 计算总耗时（秒）
-          duration=$((end - start))
-          minutes=$((duration / 60))
-          seconds=$((duration % 60))
+          # 获取工作流开始时间戳（从record-start-time job继承）
+          start=${{ needs.record-start-time.outputs.workflow_start }}
           
-          # 输出结束时间和耗时
-          echo "end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
-          echo "duration=${minutes}分${seconds}秒" >> $GITHUB_OUTPUT
+          # 计算工作流总耗时（秒）
+          total_duration=$((end - start))
+          total_minutes=$((total_duration / 60))
+          total_seconds=$((total_duration % 60))
+          
+          # 获取节点耗时统计
+          total_node_duration=${{ steps.collect_ips.outputs.total_node_duration }}
+          max_node_duration=${{ steps.collect_ips.outputs.max_node_duration }}
+          
+          # 格式化输出
+          end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
+          
+          echo "============================================================"
+          echo "  工作流运行时间统计"
+          echo "============================================================"
+          echo "  开始时间: ${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间)"
+          echo "  结束时间: ${end_time} (北京时间)"
+          echo "  总运行时间: ${total_minutes}分${total_seconds}秒 (${total_duration}秒)"
+          echo "------------------------------------------------------------"
+          echo "  节点耗时统计:"
+          echo "    13个节点耗时总和(串行参考): ${total_node_duration}秒"
+          echo "    最长节点耗时(并行参考): ${max_node_duration}秒"
+          echo "    说明: 由于13个节点并行下载，总运行时间接近最长节点耗时"
+          echo "          加上合并、打包、上传等额外时间"
+          echo "============================================================"
+          
+          # 输出到GITHUB_OUTPUT
+          echo "end_time=${end_time}" >> $GITHUB_OUTPUT
+          echo "duration=${total_minutes}分${total_seconds}秒" >> $GITHUB_OUTPUT
+          echo "duration_seconds=${total_duration}" >> $GITHUB_OUTPUT
       
       # ----------------------------------------------------------
       # 步骤9：获取汇总服务器的公网IP
@@ -411,12 +490,16 @@ jobs:
           | 项目 | 内容 |
           |------|------|
           | **下载日期** | ${{ steps.date.outputs.date }} |
-          | **开始时间** | ${{ steps.start_time.outputs.start_time }} (北京时间) |
+          | **开始时间** | ${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间) |
           | **结束时间** | ${{ steps.run_time.outputs.end_time }} (北京时间) |
-          | **运行耗时** | ${{ steps.run_time.outputs.duration }} |
+          | **总运行耗时** | ${{ steps.run_time.outputs.duration }} |
           | **下载模式** | 🌐 多IP并行（13个独立IP） |
           | **汇总IP** | ${{ env.MERGE_IP }} |
           | **总大小** | ${{ steps.collect_ips.outputs.total_size }} |
+          | **节点耗时总和(串行)** | ${{ steps.collect_ips.outputs.total_node_duration }}秒 |
+          | **最长节点耗时(并行)** | ${{ steps.collect_ips.outputs.max_node_duration }}秒 |
+          
+          > 📊 **时间说明**: 由于13个节点并行下载，工作流总运行时间 ≈ 最长节点耗时 + 合并打包上传时间
           
           ### 🌐 下载节点IP列表（13个独立IP）
           ${IP_TABLE_MD}
@@ -486,7 +569,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       # ----------------------------------------------------------
-      # 步骤12：发送邮件通知（包含所有13个节点IP）
+      # 步骤12：发送邮件通知（包含所有13个节点IP和运行时间）
       # ----------------------------------------------------------
       - name: 发送邮件通知
         # 仅在邮件配置完整时执行
@@ -498,13 +581,13 @@ jobs:
           server_port: ${{ env.MAIL_PORT }}
           username: ${{ env.MAIL_USERNAME }}
           password: ${{ env.MAIL_PASSWORD }}
-          # 邮件主题（包含日期）
-          subject: 📊 通达信数据下载完成 - ${{ steps.date.outputs.date }}
+          # 邮件主题（包含日期和运行时间）
+          subject: 📊 通达信数据下载完成 - ${{ steps.date.outputs.date }} (耗时${{ steps.run_time.outputs.duration }})
           # 邮件接收人
           to: ${{ env.MAIL_TO }}
           # 发件人名称
           from: 通达信数据自动下载
-          # HTML格式的邮件正文（包含完整的IP表格）
+          # HTML格式的邮件正文（包含完整的IP表格和时间统计）
           html_body: |
             <!DOCTYPE html>
             <html>
@@ -525,7 +608,7 @@ jobs:
               /* 信息表格 */
               .info-table { width: 100%; border-collapse: collapse; }
               .info-table td { padding: 8px 12px; border-bottom: 1px solid #eee; }
-              .info-table td:first-child { font-weight: bold; color: #666; width: 120px; }
+              .info-table td:first-child { font-weight: bold; color: #666; width: 140px; }
               /* IP表格 */
               .ip-table { width: 100%; border-collapse: collapse; background: #f8f9fa; border-radius: 5px; }
               .ip-table th { background: #667eea; color: white; padding: 12px; text-align: left; }
@@ -537,10 +620,12 @@ jobs:
               /* 页脚 */
               .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; border-top: 1px solid #eee; }
               /* 统计卡片 */
-              .stats { display: flex; justify-content: space-around; margin: 20px 0; }
-              .stat-item { text-align: center; padding: 15px; background: #f8f9fa; border-radius: 5px; flex: 1; margin: 0 5px; }
+              .stats { display: flex; justify-content: space-around; margin: 20px 0; flex-wrap: wrap; }
+              .stat-item { text-align: center; padding: 15px; background: #f8f9fa; border-radius: 5px; flex: 1; margin: 5px; min-width: 100px; }
               .stat-value { font-size: 28px; font-weight: bold; color: #667eea; }
               .stat-label { font-size: 12px; color: #666; margin-top: 5px; }
+              /* 时间说明 */
+              .time-note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px 15px; margin: 15px 0; border-radius: 0 5px 5px 0; font-size: 13px; color: #856404; }
             </style>
             </head>
             <body>
@@ -559,7 +644,7 @@ jobs:
                 </div>
                 <div class="stat-item">
                   <div class="stat-value">${{ steps.run_time.outputs.duration }}</div>
-                  <div class="stat-label">运行耗时</div>
+                  <div class="stat-label">总运行耗时</div>
                 </div>
                 <div class="stat-item">
                   <div class="stat-value">${{ steps.collect_ips.outputs.total_size }}</div>
@@ -567,23 +652,30 @@ jobs:
                 </div>
               </div>
               
+              <!-- 时间说明 -->
+              <div class="time-note">
+                ⏱️ <strong>时间说明</strong>: 13个节点并行下载，总运行时间 ≈ 最长节点耗时 + 合并打包上传时间。各节点耗时详见下方表格。
+              </div>
+              
               <!-- 执行信息 -->
               <div class="section">
                 <h2>⏱️ 执行信息</h2>
                 <table class="info-table">
                   <tr><td>下载日期</td><td>${{ steps.date.outputs.date }}</td></tr>
-                  <tr><td>开始时间</td><td>${{ steps.start_time.outputs.start_time }}</td></tr>
-                  <tr><td>结束时间</td><td>${{ steps.run_time.outputs.end_time }}</td></tr>
-                  <tr><td>运行耗时</td><td>${{ steps.run_time.outputs.duration }}</td></tr>
+                  <tr><td>开始时间</td><td>${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间)</td></tr>
+                  <tr><td>结束时间</td><td>${{ steps.run_time.outputs.end_time }} (北京时间)</td></tr>
+                  <tr><td>总运行耗时</td><td><strong>${{ steps.run_time.outputs.duration }}</strong></td></tr>
                   <tr><td>下载模式</td><td>🌐 多IP并行（13个独立IP）</td></tr>
                   <tr><td>汇总服务器IP</td><td class="ip-highlight">${{ env.MERGE_IP }}</td></tr>
                   <tr><td>所有节点IP</td><td class="ip-highlight">${{ steps.collect_ips.outputs.ip_list }}</td></tr>
+                  <tr><td>节点耗时总和(串行)</td><td>${{ steps.collect_ips.outputs.total_node_duration }}秒</td></tr>
+                  <tr><td>最长节点耗时(并行)</td><td>${{ steps.collect_ips.outputs.max_node_duration }}秒</td></tr>
                 </table>
               </div>
               
               <!-- 13个下载节点IP列表 -->
               <div class="section">
-                <h2>🌐 下载节点IP列表（全部13个独立IP）</h2>
+                <h2>🌐 下载节点详情（全部13个独立IP + 节点耗时）</h2>
                 <table class="ip-table">
                   <tr>
                     <th>序号</th>
@@ -591,6 +683,7 @@ jobs:
                     <th>描述</th>
                     <th>节点IP</th>
                     <th>大小</th>
+                    <th>节点耗时</th>
                     <th>状态</th>
                   </tr>
                   ${{ steps.collect_ips.outputs.ip_table_html }}
@@ -616,7 +709,7 @@ jobs:
             </html>
       
       # ----------------------------------------------------------
-      # 步骤13：发送Telegram通知（包含IP信息摘要）
+      # 步骤13：发送Telegram通知（包含IP信息摘要和运行时间）
       # 安全注意：禁止在日志中输出Telegram API返回的敏感信息
       # ----------------------------------------------------------
       - name: 发送 Telegram 通知
@@ -627,8 +720,9 @@ jobs:
           MESSAGE="📊 通达信数据下载完成
           
           日期: ${{ steps.date.outputs.date }}
-          耗时: ${{ steps.run_time.outputs.duration }}
+          总运行耗时: ${{ steps.run_time.outputs.duration }}
           总大小: ${{ steps.collect_ips.outputs.total_size }}
+          最长节点耗时: ${{ steps.collect_ips.outputs.max_node_duration }}秒
           
           下载节点IP:
           ${{ steps.collect_ips.outputs.ip_list }}
