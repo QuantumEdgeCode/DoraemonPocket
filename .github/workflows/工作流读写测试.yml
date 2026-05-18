@@ -17,25 +17,27 @@ jobs:
       - name: 创建测试目录
         run: mkdir -p test_files
 
-      - name: 生成 20 个 1MB 测试文件
+      - name: 生成 5 个 400MB 测试文件（总量约2GB）
         run: |
-          echo "正在生成 20 个 1MB 测试文件..."
+          echo "正在生成 5 个 400MB 测试文件（总量约2GB）..."
           cd test_files
           
-          for i in $(seq 1 20); do
+          for i in $(seq 1 5); do
             # 格式化为 01, 02, ...
             filename=$(printf "test_file_%02d.bin" $i)
             
-            # 生成 1MB 随机数据文件 (1024 * 1024 字节)
-            dd if=/dev/urandom of="$filename" bs=1024 count=1024 2>/dev/null
+            # 生成 400MB 随机数据文件 (400 * 1024 * 1024 = 409600 KB)
+            echo "正在生成 $filename (400MB)..."
+            dd if=/dev/urandom of="$filename" bs=1M count=400 2>/dev/null
             
             # 显示文件大小
             size=$(stat -c%s "$filename")
-            echo "✓ $filename 创建成功 (${size} bytes)"
+            size_mb=$(echo "scale=2; $size / 1048576" | bc)
+            echo "✓ $filename 创建成功 (${size_mb} MB)"
           done
           
           echo ""
-          echo "所有测试文件生成完毕！"
+          echo "所有测试文件生成完毕！总计约 2GB"
 
       - name: 生成校验文件
         run: |
@@ -47,6 +49,7 @@ jobs:
           echo "" >> SHA256SUMS.txt
           
           for file in *.bin; do
+            echo "正在计算 $file 的 SHA256..."
             sha256=$(sha256sum "$file" | awk '{print $1}')
             echo "$sha256  $file" >> SHA256SUMS.txt
             echo "✓ $file 校验完成"
@@ -73,7 +76,7 @@ jobs:
           tag_name: test-${{ steps.date.outputs.datetime }}
           name: 测试上传 - ${{ steps.date.outputs.datetime }}
           body: |
-            ## 🧪 多文件上传测试
+            ## 🧪 大文件上传测试（总量约2GB）
             
             **测试时间**: ${{ steps.date.outputs.datetime }}
             
@@ -81,36 +84,25 @@ jobs:
             
             | 文件名 | 大小 | SHA256 |
             |--------|------|--------|
-            | test_file_01.bin | 1MB | ✓ |
-            | test_file_02.bin | 1MB | ✓ |
-            | test_file_03.bin | 1MB | ✓ |
-            | test_file_04.bin | 1MB | ✓ |
-            | test_file_05.bin | 1MB | ✓ |
-            | test_file_06.bin | 1MB | ✓ |
-            | test_file_07.bin | 1MB | ✓ |
-            | test_file_08.bin | 1MB | ✓ |
-            | test_file_09.bin | 1MB | ✓ |
-            | test_file_10.bin | 1MB | ✓ |
-            | test_file_11.bin | 1MB | ✓ |
-            | test_file_12.bin | 1MB | ✓ |
-            | test_file_13.bin | 1MB | ✓ |
-            | test_file_14.bin | 1MB | ✓ |
-            | test_file_15.bin | 1MB | ✓ |
-            | test_file_16.bin | 1MB | ✓ |
-            | test_file_17.bin | 1MB | ✓ |
-            | test_file_18.bin | 1MB | ✓ |
-            | test_file_19.bin | 1MB | ✓ |
-            | test_file_20.bin | 1MB | ✓ |
+            | test_file_01.bin | 400MB | ✓ |
+            | test_file_02.bin | 400MB | ✓ |
+            | test_file_03.bin | 400MB | ✓ |
+            | test_file_04.bin | 400MB | ✓ |
+            | test_file_05.bin | 400MB | ✓ |
+            
+            ### 📊 总计
+            - **文件总数**: 5 个
+            - **总大小**: 约 2GB (2,000MB)
             
             ### 📄 其他文件
             - `SHA256SUMS.txt` - 校验文件
             - `write_test.txt` - 写入测试文件
             
             ### ✅ 测试项目
-            - [x] 文件生成
+            - [x] 大文件生成 (5×400MB)
             - [x] SHA256 校验
             - [x] 写入权限
-            - [x] 多文件上传
+            - [x] 大文件上传
             
             ---
             *GitHub Actions 自动生成*
@@ -120,21 +112,6 @@ jobs:
             test_files/test_file_03.bin
             test_files/test_file_04.bin
             test_files/test_file_05.bin
-            test_files/test_file_06.bin
-            test_files/test_file_07.bin
-            test_files/test_file_08.bin
-            test_files/test_file_09.bin
-            test_files/test_file_10.bin
-            test_files/test_file_11.bin
-            test_files/test_file_12.bin
-            test_files/test_file_13.bin
-            test_files/test_file_14.bin
-            test_files/test_file_15.bin
-            test_files/test_file_16.bin
-            test_files/test_file_17.bin
-            test_files/test_file_18.bin
-            test_files/test_file_19.bin
-            test_files/test_file_20.bin
             test_files/SHA256SUMS.txt
             test_files/write_test.txt
           draft: false
@@ -147,8 +124,9 @@ jobs:
           echo "========================================="
           echo "  测试工作流执行完毕！"
           echo "========================================="
-          echo "  生成文件数: 20 个 1MB 文件"
+          echo "  生成文件数: 5 个 400MB 文件"
+          echo "  总大小: 约 2GB"
           echo "  校验文件: SHA256SUMS.txt"
           echo "  测试文件: write_test.txt"
-          echo "  总文件数: 22 个"
+          echo "  总上传文件数: 7 个"
           echo "========================================="
