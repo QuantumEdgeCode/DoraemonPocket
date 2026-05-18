@@ -17,27 +17,127 @@ jobs:
       - name: 创建测试目录
         run: mkdir -p test_files
 
-      - name: 生成 5 个 400MB 测试文件（总量约2GB）
+      - name: 生成 13 个测试 zip 文件（总量约1.30GB）
         run: |
-          echo "正在生成 5 个 400MB 测试文件（总量约2GB）..."
+          echo "正在生成 13 个测试 zip 文件..."
+          echo "============================================================"
+          echo "  检测文件数: 13"
+          echo "------------------------------------------------------------"
           cd test_files
           
-          for i in $(seq 1 5); do
-            # 格式化为 01, 02, ...
-            filename=$(printf "test_file_%02d.bin" $i)
+          # 定义文件名和大小数组
+          declare -A files
+          files=(
+            ["shlday.zip"]=213.80
+            ["szlday.zip"]=249.12
+            ["bjlday.zip"]=8.40
+            ["tdxzs_day.zip"]=73.36
+            ["shzsday.zip"]=26.25
+            ["szzsday.zip"]=34.23
+            ["shlday_4.zip"]=215.25
+            ["szlday_4.zip"]=251.20
+            ["shqqday.zip"]=17.64
+            ["szqqday.zip"]=10.59
+            ["xsbday.zip"]=32.91
+            ["62day.zip"]=46.79
+            ["ggtday.zip"]=147.14
+          )
+          
+          # 文件描述
+          declare -A descriptions
+          descriptions=(
+            ["shlday.zip"]="沪市日线数据"
+            ["szlday.zip"]="深市日线数据"
+            ["bjlday.zip"]="北交所日线数据"
+            ["tdxzs_day.zip"]="通达信指数日线"
+            ["shzsday.zip"]="沪市指数日线"
+            ["szzsday.zip"]="深市指数日线"
+            ["shlday_4.zip"]="沪市日线（4位代码）"
+            ["szlday_4.zip"]="深市日线（4位代码）"
+            ["shqqday.zip"]="沪市全权日线"
+            ["szqqday.zip"]="深市全权日线"
+            ["xsbday.zip"]="新三板日线"
+            ["62day.zip"]="62板块日线"
+            ["ggtday.zip"]="港股通日线"
+          )
+          
+          # 文件顺序
+          file_order=(
+            "shlday.zip"
+            "szlday.zip"
+            "bjlday.zip"
+            "tdxzs_day.zip"
+            "shzsday.zip"
+            "szzsday.zip"
+            "shlday_4.zip"
+            "szlday_4.zip"
+            "shqqday.zip"
+            "szqqday.zip"
+            "xsbday.zip"
+            "62day.zip"
+            "ggtday.zip"
+          )
+          
+          counter=1
+          total_size=0
+          
+          for filename in "${file_order[@]}"; do
+            size_mb=${files[$filename]}
+            size_bytes=$(echo "$size_mb * 1048576" | bc | cut -d'.' -f1)
+            desc=${descriptions[$filename]}
             
-            # 生成 400MB 随机数据文件 (400 * 1024 * 1024 = 409600 KB)
-            echo "正在生成 $filename (400MB)..."
-            dd if=/dev/urandom of="$filename" bs=1M count=400 2>/dev/null
+            # 格式化计数器
+            counter_str=$(printf "%2d" $counter)
             
-            # 显示文件大小
-            size=$(stat -c%s "$filename")
-            size_mb=$(echo "scale=2; $size / 1048576" | bc)
-            echo "✓ $filename 创建成功 (${size_mb} MB)"
+            echo "[$counter_str/13] 正在生成: $filename ($desc)..."
+            
+            # 创建包含描述信息的 zip 文件
+            # 先生成临时内容
+            temp_dir="temp_${filename%.zip}"
+            mkdir -p "$temp_dir"
+            
+            # 创建说明文件
+            echo "文件名: $filename" > "$temp_dir/README.txt"
+            echo "描述: $desc" >> "$temp_dir/README.txt"
+            echo "目标大小: ${size_mb} MB" >> "$temp_dir/README.txt"
+            echo "生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> "$temp_dir/README.txt"
+            
+            # 生成随机数据以达到目标大小（减去README的大小）
+            readme_size=$(stat -c%s "$temp_dir/README.txt")
+            data_size=$((size_bytes - readme_size - 1024))  # 预留1KB余量
+            
+            dd if=/dev/urandom of="$temp_dir/data.bin" bs=1M count=$((data_size / 1048576)) 2>/dev/null
+            # 补充剩余字节
+            remaining=$((data_size % 1048576))
+            if [ $remaining -gt 0 ]; then
+              dd if=/dev/urandom of="$temp_dir/data_remainder.bin" bs=1 count=$remaining 2>/dev/null
+            fi
+            
+            # 创建 zip 文件
+            cd "$temp_dir"
+            zip -r "../$filename" . > /dev/null 2>&1
+            cd ..
+            
+            # 清理临时目录
+            rm -rf "$temp_dir"
+            
+            # 检查实际大小
+            actual_size=$(stat -c%s "$filename")
+            actual_size_mb=$(echo "scale=2; $actual_size / 1048576" | bc)
+            
+            echo "✅ $actual_size_mb MB"
+            
+            total_size=$((total_size + actual_size))
+            counter=$((counter + 1))
           done
           
-          echo ""
-          echo "所有测试文件生成完毕！总计约 2GB"
+          total_size_gb=$(echo "scale=2; $total_size / 1073741824" | bc)
+          
+          echo "------------------------------------------------------------"
+          echo "  总计文件大小: ${total_size_gb} GB"
+          echo "  成功生成: 13/13"
+          echo "============================================================"
+          echo "✅ 所有文件生成完成"
 
       - name: 生成校验文件
         run: |
@@ -48,15 +148,13 @@ jobs:
           echo "# 生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
           
-          for file in *.bin; do
+          for file in *.zip; do
             echo "正在计算 $file 的 SHA256..."
             sha256=$(sha256sum "$file" | awk '{print $1}')
             echo "$sha256  $file" >> SHA256SUMS.txt
-            echo "✓ $file 校验完成"
           done
           
-          echo ""
-          echo "SHA256 校验文件生成完毕！"
+          echo "✅ SHA256 校验文件生成完毕！"
 
       - name: 测试写入权限
         run: |
@@ -76,42 +174,58 @@ jobs:
           tag_name: test-${{ steps.date.outputs.datetime }}
           name: 测试上传 - ${{ steps.date.outputs.datetime }}
           body: |
-            ## 🧪 大文件上传测试（总量约2GB）
+            ## 🧪 13个zip测试文件上传
             
             **测试时间**: ${{ steps.date.outputs.datetime }}
             
             ### 📁 测试文件列表
             
-            | 文件名 | 大小 | SHA256 |
-            |--------|------|--------|
-            | test_file_01.bin | 400MB | ✓ |
-            | test_file_02.bin | 400MB | ✓ |
-            | test_file_03.bin | 400MB | ✓ |
-            | test_file_04.bin | 400MB | ✓ |
-            | test_file_05.bin | 400MB | ✓ |
+            | 文件名 | 描述 | 大小 |
+            |--------|------|------|
+            | shlday.zip | 沪市日线数据 | 213.80 MB |
+            | szlday.zip | 深市日线数据 | 249.12 MB |
+            | bjlday.zip | 北交所日线数据 | 8.40 MB |
+            | tdxzs_day.zip | 通达信指数日线 | 73.36 MB |
+            | shzsday.zip | 沪市指数日线 | 26.25 MB |
+            | szzsday.zip | 深市指数日线 | 34.23 MB |
+            | shlday_4.zip | 沪市日线（4位代码） | 215.25 MB |
+            | szlday_4.zip | 深市日线（4位代码） | 251.20 MB |
+            | shqqday.zip | 沪市全权日线 | 17.64 MB |
+            | szqqday.zip | 深市全权日线 | 10.59 MB |
+            | xsbday.zip | 新三板日线 | 32.91 MB |
+            | 62day.zip | 62板块日线 | 46.79 MB |
+            | ggtday.zip | 港股通日线 | 147.14 MB |
             
             ### 📊 总计
-            - **文件总数**: 5 个
-            - **总大小**: 约 2GB (2,000MB)
+            - **文件总数**: 13 个
+            - **总大小**: 约 1.30 GB
             
             ### 📄 其他文件
             - `SHA256SUMS.txt` - 校验文件
             - `write_test.txt` - 写入测试文件
             
             ### ✅ 测试项目
-            - [x] 大文件生成 (5×400MB)
+            - [x] zip文件生成（模拟真实数据文件）
             - [x] SHA256 校验
             - [x] 写入权限
-            - [x] 大文件上传
+            - [x] 13个文件批量上传
             
             ---
             *GitHub Actions 自动生成*
           files: |
-            test_files/test_file_01.bin
-            test_files/test_file_02.bin
-            test_files/test_file_03.bin
-            test_files/test_file_04.bin
-            test_files/test_file_05.bin
+            test_files/shlday.zip
+            test_files/szlday.zip
+            test_files/bjlday.zip
+            test_files/tdxzs_day.zip
+            test_files/shzsday.zip
+            test_files/szzsday.zip
+            test_files/shlday_4.zip
+            test_files/szlday_4.zip
+            test_files/shqqday.zip
+            test_files/szqqday.zip
+            test_files/xsbday.zip
+            test_files/62day.zip
+            test_files/ggtday.zip
             test_files/SHA256SUMS.txt
             test_files/write_test.txt
           draft: false
@@ -121,12 +235,12 @@ jobs:
 
       - name: 测试完成
         run: |
-          echo "========================================="
+          echo "============================================================"
           echo "  测试工作流执行完毕！"
-          echo "========================================="
-          echo "  生成文件数: 5 个 400MB 文件"
-          echo "  总大小: 约 2GB"
+          echo "============================================================"
+          echo "  生成文件数: 13 个 zip 文件"
+          echo "  总大小: 约 1.30 GB"
           echo "  校验文件: SHA256SUMS.txt"
           echo "  测试文件: write_test.txt"
-          echo "  总上传文件数: 7 个"
-          echo "========================================="
+          echo "  总上传文件数: 15 个"
+          echo "============================================================"
