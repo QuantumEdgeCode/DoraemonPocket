@@ -18,6 +18,8 @@ jobs:
   clean-large-files:
     name: 清理历史大文件
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 需要写入权限才能推送
     
     steps:
       - name: 检出仓库（完整历史）
@@ -162,6 +164,9 @@ jobs:
           echo "=========================================="
           echo ""
           
+          # 重新添加远程仓库（git filter-repo 会移除它）
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          
           # 强制推送（因为历史被重写了）
           git push origin --force --all
           git push origin --force --tags
@@ -170,7 +175,7 @@ jobs:
           echo ""
           echo "⚠️  注意：所有协作者需要重新克隆仓库"
           echo "   执行以下命令重新获取代码："
-          echo "   git clone ${{ github.server_url }}/${{ github.repository }}.git"
+          echo "   git clone https://github.com/${{ github.repository }}.git"
       
       - name: 生成清理报告
         run: |
