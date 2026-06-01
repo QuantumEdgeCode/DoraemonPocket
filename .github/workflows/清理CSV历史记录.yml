@@ -67,7 +67,7 @@ jobs:
           
           if [ ! -s /tmp/all-csv-files.txt ]; then
             echo "✅ 没有找到大于 ${THRESHOLD}MB 的CSV历史文件"
-            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "HAS_FILES=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
@@ -100,7 +100,7 @@ jobs:
           
           if [ "$DELETE_COUNT" -eq 0 ]; then
             echo "✅ 没有需要清理的已删除CSV文件"
-            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "HAS_FILES=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
@@ -145,13 +145,13 @@ jobs:
             --force
           
           echo "✅ 历史清理完成"
-          echo "has_files=true" >> $GITHUB_OUTPUT
-          echo "delete_count=${DELETE_COUNT}" >> $GITHUB_OUTPUT
-          echo "delete_size=${DELETE_SIZE}" >> $GITHUB_OUTPUT
-          echo "still_exists=${STILL_EXISTS_COUNT}" >> $GITHUB_OUTPUT
+          echo "HAS_FILES=true" >> $GITHUB_OUTPUT
+          echo "DELETE_COUNT=${DELETE_COUNT}" >> $GITHUB_OUTPUT
+          echo "DELETE_SIZE=${DELETE_SIZE}" >> $GITHUB_OUTPUT
+          echo "STILL_EXISTS=${STILL_EXISTS_COUNT}" >> $GITHUB_OUTPUT
       
       - name: 验证清理结果
-        if: steps.clean.outputs.has_files == 'true'
+        if: steps.clean.outputs.HAS_FILES == 'true'
         run: |
           echo ""
           echo "=========================================="
@@ -179,12 +179,11 @@ jobs:
             echo "⚠️  仍有 ${REMAINING} 个文件未完全清理"
           fi
           
-          # 验证当前文件未受影响
           echo ""
           echo "✅ 当前代码中的CSV文件未受影响"
       
       - name: 推送清理后的仓库
-        if: steps.clean.outputs.has_files == 'true' && github.event.inputs.force_push == 'true'
+        if: steps.clean.outputs.HAS_FILES == 'true' && github.event.inputs.force_push == 'true'
         run: |
           echo ""
           echo "=========================================="
@@ -202,7 +201,7 @@ jobs:
           echo "⚠️  所有协作者需要重新克隆仓库："
           echo "   git clone https://github.com/${{ github.repository }}.git"
       
-      - name: 生成并上传清理报告
+      - name: 生成报告
         if: always()
         run: |
           mkdir -p /tmp/report
@@ -221,10 +220,10 @@ jobs:
           
           EOF
           
-          if [ "${{ steps.clean.outputs.has_files }}" = "true" ]; then
-            echo "- **已清理文件数**: ${{ steps.clean.outputs.delete_count }}" >> /tmp/report/csv-cleanup-report.md
-            echo "- **释放空间**: ${{ steps.clean.outputs.delete_size }} MB" >> /tmp/report/csv-cleanup-report.md
-            echo "- **保留的文件**: ${{ steps.clean.outputs.still_exists }} 个（仍在代码中）" >> /tmp/report/csv-cleanup-report.md
+          if [ "${{ steps.clean.outputs.HAS_FILES }}" = "true" ]; then
+            echo "- **已清理文件数**: ${{ steps.clean.outputs.DELETE_COUNT }}" >> /tmp/report/csv-cleanup-report.md
+            echo "- **释放空间**: ${{ steps.clean.outputs.DELETE_SIZE }} MB" >> /tmp/report/csv-cleanup-report.md
+            echo "- **保留的文件**: ${{ steps.clean.outputs.STILL_EXISTS }} 个（仍在代码中）" >> /tmp/report/csv-cleanup-report.md
             echo "" >> /tmp/report/csv-cleanup-report.md
             
             if [ -f /tmp/csv-to-delete.txt ]; then
@@ -260,8 +259,6 @@ jobs:
           cp /tmp/all-csv-files.txt /tmp/report/ 2>/dev/null || true
           cp /tmp/csv-to-delete.txt /tmp/report/ 2>/dev/null || true
           cp /tmp/csv-still-exists.txt /tmp/report/ 2>/dev/null || true
-          
-          echo "report_dir=/tmp/report" >> $GITHUB_OUTPUT
       
       - name: 上传清理报告
         if: always()
@@ -280,11 +277,11 @@ jobs:
           echo "=========================================="
           echo ""
           
-          if [ "${{ steps.clean.outputs.has_files }}" = "true" ]; then
+          if [ "${{ steps.clean.outputs.HAS_FILES }}" = "true" ]; then
             echo "🗑️  清理结果："
-            echo "   - 已清理: ${{ steps.clean.outputs.delete_count }} 个已删除的CSV历史记录"
-            echo "   - 释放空间: ${{ steps.clean.outputs.delete_size }} MB"
-            echo "   - 保留: ${{ steps.clean.outputs.still_exists }} 个CSV文件（仍在代码中）"
+            echo "   - 已清理: ${{ steps.clean.outputs.DELETE_COUNT }} 个已删除的CSV历史记录"
+            echo "   - 释放空间: ${{ steps.clean.outputs.DELETE_SIZE }} MB"
+            echo "   - 保留: ${{ steps.clean.outputs.STILL_EXISTS }} 个CSV文件（仍在代码中）"
             echo ""
             
             if [ "${{ github.event.inputs.force_push }}" = "true" ]; then
