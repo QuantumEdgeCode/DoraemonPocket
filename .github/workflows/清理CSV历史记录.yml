@@ -1,0 +1,375 @@
+name: 清理CSV历史记录
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_pattern:
+        description: 'CSV文件匹配模式（如 *.csv 或 data/*.csv）'
+        required: false
+        default: '*.csv'
+        type: string
+      delete_from_current:
+        description: '是否同时从当前代码中删除CSV文件'
+        required: false
+        default: true
+        type: boolean
+      force_push:
+        description: '强制推送到远程仓库'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  clean-csv-history:
+    name: 清理CSV文件历史记录
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: 检出仓库（完整历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 配置Git用户信息
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: 分析CSV文件历史
+        id: analyze
+        run: |
+          echo "=========================================="
+          echo "📊 分析CSV文件历史记录"
+          echo "=========================================="
+          echo ""
+          
+          FILE_PATTERN="${{ github.event.inputs.file_pattern || '*.csv' }}"
+          
+          echo "🔍 文件匹配模式: ${FILE_PATTERN}"
+          echo ""
+          
+          # 查找所有匹配的CSV文件历史记录
+          echo "📋 正在扫描CSV文件历史..."
+          
+          # 获取所有CSV文件的blob对象
+          git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(objectsize) %(objectname) %(rest)' | \
+            awk '/^blob/ && $4 ~ /\.csv$/ {
+              size_mb = $2 / 1024 / 1024
+              printf "%.2f MB\t%s\t%s\n", size_mb, $3, $4
+            }' | sort -hr > csv-files-all.txt
+          
+          if [ -s csv-files-all.txt ]; then
+            echo "找到以下CSV文件历史记录："
+            echo ""
+            
+            # 统计文件信息
+            TOTAL_CSV=$(wc -l < csv-files-all.txt)
+            TOTAL_SIZE=$(awk '{sum += $1} END {printf "%.2f", sum}' csv-files-all.txt)
+            
+            echo "  文件对象数: ${TOTAL_CSV}"
+            echo "  总大小: ${TOTAL_SIZE} MB"
+            echo ""
+            
+            # 按文件路径去重
+            echo "📁 CSV文件列表（去重后）："
+            awk '{print $3}' csv-files-all.txt | sort -u > csv-unique-paths.txt
+            UNIQUE_COUNT=$(wc -l < csv-unique-paths.txt)
+            echo "  唯一文件路径: ${UNIQUE_COUNT}"
+            echo ""
+            
+            echo "前20个最大的CSV文件历史记录："
+            head -20 csv-files-all.txt | awk '{printf "  %s  %s\n", $1, $3}'
+            echo ""
+            
+            # 获取当前存在的CSV文件
+            find . -type f -name "*.csv" -not -path "./.git/*" > current-csv-files.txt
+            CURRENT_COUNT=$(wc -l < current-csv-files.txt)
+            echo "📁 当前代码中的CSV文件数: ${CURRENT_COUNT}"
+            
+            # 找出可清理的文件（不在当前代码中的）
+            > csv-files-to-delete.txt
+            > csv-files-kept.txt
+            
+            while read -r filepath; do
+              if [ -f "$filepath" ]; then
+                echo "$filepath" >> csv-files-kept.txt
+              else
+                echo "$filepath" >> csv-files-to-delete.txt
+              fi
+            done < csv-unique-paths.txt
+            
+            DELETE_COUNT=$(wc -l < csv-files-to-delete.txt 2>/dev/null || echo 0)
+            KEPT_COUNT=$(wc -l < csv-files-kept.txt 2>/dev/null || echo 0)
+            
+            echo ""
+            echo "📊 清理分析结果："
+            echo "  - 可清理的历史文件: ${DELETE_COUNT}"
+            echo "  - 仍在使用中的文件: ${KEPT_COUNT}"
+            
+            if [ -s csv-files-to-delete.txt ]; then
+              echo ""
+              echo "可清理的文件列表："
+              cat csv-files-to-delete.txt | head -20
+            fi
+            
+            echo "total_size=${TOTAL_SIZE}" >> $GITHUB_OUTPUT
+            echo "delete_count=${DELETE_COUNT}" >> $GITHUB_OUTPUT
+            echo "kept_count=${KEPT_COUNT}" >> $GITHUB_OUTPUT
+            echo "has_csv=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ 未发现CSV文件历史记录"
+            echo "has_csv=false" >> $GITHUB_OUTPUT
+            echo "total_size=0" >> $GITHUB_OUTPUT
+            echo "delete_count=0" >> $GITHUB_OUTPUT
+            echo "kept_count=0" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 显示CSV文件提交历史
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📋 CSV文件提交历史（最近50条）"
+          echo "=========================================="
+          echo ""
+          
+          git log --all --pretty=format:"%h - %s (%an, %ar)" --name-only -- '*.csv' | head -50 > csv-commits.txt
+          
+          if [ -s csv-commits.txt ]; then
+            cat csv-commits.txt
+          else
+            echo "没有找到CSV文件的提交记录"
+          fi
+      
+      - name: 清理CSV历史记录
+        id: clean
+        if: steps.analyze.outputs.has_csv == 'true'
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🗑️  开始清理CSV文件历史记录"
+          echo "=========================================="
+          echo ""
+          
+          DELETE_FROM_CURRENT="${{ github.event.inputs.delete_from_current }}"
+          FILE_PATTERN="${{ github.event.inputs.file_pattern || '*.csv' }}"
+          
+          # 安装git-filter-repo
+          echo "📦 安装 git-filter-repo..."
+          sudo apt-get update -qq && sudo apt-get install -y -qq git-filter-repo
+          
+          # 如果要同时删除当前文件，先从工作目录中删除
+          if [ "$DELETE_FROM_CURRENT" = "true" ]; then
+            echo "🗑️  从当前代码中删除CSV文件..."
+            
+            DELETED_FILES=$(find . -type f -name "*.csv" -not -path "./.git/*")
+            if [ -n "$DELETED_FILES" ]; then
+              echo "$DELETED_FILES" | while read -r file; do
+                echo "  删除: $file"
+                rm -f "$file"
+              done
+              
+              # 提交删除操作
+              git add -A
+              git commit -m "🗑️ 删除CSV文件 - 准备清理历史记录
+          
+          - 从代码库中移除所有CSV文件
+          - 准备清理Git历史中的CSV记录" || echo "没有变更需要提交"
+            else
+              echo "  当前目录中没有CSV文件"
+            fi
+          fi
+          
+          # 使用git-filter-repo清理历史
+          echo ""
+          echo "🛠️  清理Git历史中的CSV文件..."
+          git filter-repo \
+            --path-glob "$FILE_PATTERN" \
+            --invert-paths \
+            --force
+          
+          echo "✅ CSV文件历史清理完成"
+          echo "cleaned=true" >> $GITHUB_OUTPUT
+      
+      - name: 显示清理后的状态
+        if: steps.clean.outputs.cleaned == 'true'
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 清理后仓库状态"
+          echo "=========================================="
+          echo ""
+          
+          # 检查是否还有CSV文件
+          REMAINING_CSV=$(find . -type f -name "*.csv" -not -path "./.git/*" | wc -l)
+          echo "📁 当前CSV文件数量: ${REMAINING_CSV}"
+          
+          # 检查仓库大小变化
+          echo ""
+          echo "📦 仓库大小："
+          git count-objects -vH
+          
+          # 验证清理结果
+          echo ""
+          echo "🔍 验证历史清理结果..."
+          CSV_IN_HISTORY=$(git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(rest)' | \
+            awk '/^blob/ && $2 ~ /\.csv$/' | wc -l)
+          
+          if [ "$CSV_IN_HISTORY" -eq 0 ]; then
+            echo "✅ 所有CSV文件历史已完全清理"
+          else
+            echo "⚠️  仍有 ${CSV_IN_HISTORY} 个CSV文件对象在历史中"
+          fi
+      
+      - name: 推送清理后的仓库
+        if: steps.clean.outputs.cleaned == 'true' && github.event.inputs.force_push == 'true'
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🚀 推送清理后的历史到远程仓库"
+          echo "=========================================="
+          echo ""
+          
+          # 重新添加远程仓库
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          
+          # 强制推送
+          git push origin --force --all
+          git push origin --force --tags
+          
+          echo "✅ 已成功推送到远程仓库"
+          echo ""
+          echo "⚠️  注意：所有协作者需要重新克隆仓库"
+          echo "   执行以下命令重新获取代码："
+          echo "   git clone https://github.com/${{ github.repository }}.git"
+      
+      - name: 生成清理报告
+        run: |
+          cat > csv-cleanup-report.md << EOF
+          # 🗑️ CSV文件历史清理报告
+          
+          ## 📋 基本信息
+          
+          - **清理时间**: $(date '+%Y-%m-%d %H:%M:%S')
+          - **仓库**: ${{ github.repository }}
+          - **文件模式**: ${{ github.event.inputs.file_pattern || '*.csv' }}
+          - **删除当前文件**: ${{ github.event.inputs.delete_from_current }}
+          - **是否已推送**: ${{ github.event.inputs.force_push == 'true' && '是 ✅' || '否 ❌' }}
+          
+          ## 📊 清理统计
+          
+          - **CSV文件历史大小**: ${{ steps.analyze.outputs.total_size || '0' }} MB
+          - **可清理的历史文件**: ${{ steps.analyze.outputs.delete_count || '0' }} 个
+          - **保留的文件**: ${{ steps.analyze.outputs.kept_count || '0' }} 个
+          
+          EOF
+          
+          if [ "${{ steps.clean.outputs.cleaned }}" = "true" ]; then
+            echo "## ✅ 清理状态" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo "CSV文件历史已成功清理 🎉" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            
+            if [ -f csv-files-to-delete.txt ] && [ -s csv-files-to-delete.txt ]; then
+              echo "### 已从历史中删除的文件" >> csv-cleanup-report.md
+              echo '```' >> csv-cleanup-report.md
+              cat csv-files-to-delete.txt >> csv-cleanup-report.md
+              echo '```' >> csv-cleanup-report.md
+              echo "" >> csv-cleanup-report.md
+            fi
+            
+            if [ -f csv-files-kept.txt ] && [ -s csv-files-kept.txt ]; then
+              echo "### 保留的文件（仍在代码中）" >> csv-cleanup-report.md
+              echo '```' >> csv-cleanup-report.md
+              cat csv-files-kept.txt >> csv-cleanup-report.md
+              echo '```' >> csv-cleanup-report.md
+            fi
+          else
+            echo "## ℹ️ 清理状态" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo "未执行清理操作（可能没有CSV文件或已取消）" >> csv-cleanup-report.md
+          fi
+          
+          echo "" >> csv-cleanup-report.md
+          echo "## 📌 重要提示" >> csv-cleanup-report.md
+          echo "" >> csv-cleanup-report.md
+          
+          if [ "${{ github.event.inputs.force_push }}" = "true" ]; then
+            echo "⚠️  **历史已被重写并推送到远程仓库**" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo "### 所有协作者必须执行以下操作：" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo '```bash' >> csv-cleanup-report.md
+            echo "# 1. 备份未提交的更改" >> csv-cleanup-report.md
+            echo "git stash" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo "# 2. 获取新历史" >> csv-cleanup-report.md
+            echo "git fetch origin" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo "# 3. 重置到新历史" >> csv-cleanup-report.md
+            echo "git reset --hard origin/main  # 或你的主分支名" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo "# 4. 清理未追踪文件" >> csv-cleanup-report.md
+            echo "git clean -fd" >> csv-cleanup-report.md
+            echo '```' >> csv-cleanup-report.md
+          else
+            echo "💡 **历史已在本地清理，但尚未推送到远程**" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo "要完成清理，需要手动执行强制推送：" >> csv-cleanup-report.md
+            echo "" >> csv-cleanup-report.md
+            echo '```bash' >> csv-cleanup-report.md
+            echo "git push origin --force --all" >> csv-cleanup-report.md
+            echo "git push origin --force --tags" >> csv-cleanup-report.md
+            echo '```' >> csv-cleanup-report.md
+          fi
+          
+          echo "" >> csv-cleanup-report.md
+          echo "---" >> csv-cleanup-report.md
+          echo "*清理操作由 GitHub Actions 执行*" >> csv-cleanup-report.md
+          echo "*生成时间: $(date '+%Y-%m-%d %H:%M:%S')*" >> csv-cleanup-report.md
+      
+      - name: 上传清理报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: csv-cleanup-report
+          path: |
+            csv-cleanup-report.md
+            csv-files-all.txt
+            csv-files-to-delete.txt
+            csv-files-kept.txt
+            csv-commits.txt
+          retention-days: 30
+      
+      - name: 显示最终摘要
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ CSV文件清理工作流执行完成"
+          echo "=========================================="
+          echo ""
+          
+          if [ "${{ steps.clean.outputs.cleaned }}" = "true" ]; then
+            echo "🗑️  清理结果："
+            echo "   - 已清理CSV文件历史: ${{ steps.analyze.outputs.delete_count }} 个"
+            echo "   - 释放空间: ${{ steps.analyze.outputs.total_size }} MB"
+            echo ""
+            
+            if [ "${{ github.event.inputs.force_push }}" = "true" ]; then
+              echo "🚀 已推送到远程仓库"
+              echo "⚠️  请通知所有协作者重新克隆仓库"
+            else
+              echo "💡 清理已完成但未推送"
+              echo "   如需推送，请重新运行并设置 force_push=true"
+            fi
+          else
+            echo "ℹ️  没有需要清理的CSV文件或操作已跳过"
+          fi
+          
+          echo ""
+          echo "📁 完整报告已保存为 Artifact: csv-cleanup-report"
