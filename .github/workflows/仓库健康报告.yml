@@ -1,0 +1,334 @@
+name: 仓库健康报告
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 1'  # 每周一早上8点自动运行
+
+jobs:
+  health-report:
+    name: 生成并发送仓库健康报告
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 收集仓库基本信息
+        id: basic_info
+        run: |
+          echo "=========================================="
+          echo "📊 收集仓库基本信息"
+          echo "=========================================="
+          
+          REPO_NAME="${{ github.repository }}"
+          DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || echo "main")
+          REPO_SIZE=$(git count-objects -vH 2>/dev/null | grep 'size-pack' | awk '{print $NF}' || echo "N/A")
+          
+          BRANCH_COUNT=$(git branch -r | wc -l)
+          TOTAL_COMMITS=$(git rev-list --count --all 2>/dev/null || echo 0)
+          TAG_COUNT=$(git tag | wc -l)
+          CONTRIBUTORS=$(git log --all --format="%an" 2>/dev/null | sort -u | wc -l)
+          
+          echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_OUTPUT
+          echo "DEFAULT_BRANCH=${DEFAULT_BRANCH}" >> $GITHUB_OUTPUT
+          echo "REPO_SIZE=${REPO_SIZE}" >> $GITHUB_OUTPUT
+          echo "BRANCH_COUNT=${BRANCH_COUNT}" >> $GITHUB_OUTPUT
+          echo "TOTAL_COMMITS=${TOTAL_COMMITS}" >> $GITHUB_OUTPUT
+          echo "TAG_COUNT=${TAG_COUNT}" >> $GITHUB_OUTPUT
+          echo "CONTRIBUTORS=${CONTRIBUTORS}" >> $GITHUB_OUTPUT
+          
+          echo "仓库名称: ${REPO_NAME}"
+          echo "默认分支: ${DEFAULT_BRANCH}"
+          echo "仓库大小: ${REPO_SIZE}"
+          echo "分支数: ${BRANCH_COUNT}"
+          echo "总提交: ${TOTAL_COMMITS}"
+          echo "标签数: ${TAG_COUNT}"
+          echo "贡献者: ${CONTRIBUTORS}"
+      
+      - name: 收集分析数据
+        run: |
+          # 存储分析
+          {
+            echo "=== Git对象统计 ==="
+            git count-objects -vH 2>/dev/null || echo "无法获取"
+            echo ""
+            echo "=== 最大对象（前10个） ==="
+            git rev-list --objects --all 2>/dev/null | \
+              git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' 2>/dev/null | \
+              awk '/^blob/ {printf "%.2f MB\t%s\n", $2/1024/1024, $3}' | \
+              sort -rn | head -10 || echo "无数据"
+          } > /tmp/size-analysis.txt
+          
+          # 文件类型
+          {
+            echo "=== 文件类型分布（前20名） ==="
+            git ls-tree -r HEAD --name-only 2>/dev/null | \
+              grep -v '/$' | \
+              awk -F. '{if(NF>1) print $NF; else print "无后缀"}' | \
+              sort | uniq -c | sort -rn | head -20 | \
+              awk '{printf "  %5d 个  .%s\n", $1, $2}' || echo "无数据"
+          } > /tmp/file-analysis.txt
+          
+          # 大文件
+          {
+            echo "=== 当前代码大文件（>1MB） ==="
+            find . -type f -size +1M -not -path "./.git/*" -exec ls -lh {} \; 2>/dev/null | \
+              awk '{printf "  %s\t%s\n", $5, $9}' | sort -rh | head -20
+            [ $? -ne 0 ] && echo "无大文件"
+            echo ""
+            echo "=== 历史大文件（>5MB） ==="
+            git rev-list --objects --all 2>/dev/null | \
+              git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' 2>/dev/null | \
+              awk '/^blob/ && $2 > 5242880 {printf "  %.2f MB\t%s\n", $2/1024/1024, $3}' | \
+              sort -rh | head -20
+            [ $? -ne 0 ] && echo "无大文件"
+          } > /tmp/large-files.txt
+          
+          # 提交活动
+          {
+            echo "=== 最近30天提交活动 ==="
+            git log --since="30 days ago" --format="%ad" --date=short 2>/dev/null | \
+              sort | uniq -c | tail -20 | \
+              awk '{printf "  %s: %s 次提交\n", $2, $1}'
+            echo ""
+            echo "=== 贡献者统计（前10名） ==="
+            git log --all --format="%an" 2>/dev/null | sort | uniq -c | sort -rn | head -10 | \
+              awk '{printf "  %3d 次提交  %s\n", $1, $2}'
+          } > /tmp/activity-analysis.txt
+          
+          # 分支分析
+          {
+            echo "=== 分支列表 ==="
+            DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || echo "main")
+            git branch -r | while read -r branch; do
+              branch=$(echo "$branch" | xargs)
+              [ -z "$branch" ] && continue
+              LAST_COMMIT=$(git log -1 --format="%ar" "$branch" 2>/dev/null || echo "N/A")
+              printf "  %-40s 最后提交: %s\n" "${branch#origin/}" "$LAST_COMMIT"
+            done
+            echo ""
+            echo "=== 超过3个月未更新的分支 ==="
+            THREE_MONTHS_AGO=$(date -d "3 months ago" +%s 2>/dev/null || echo 0)
+            git branch -r | while read -r branch; do
+              branch=$(echo "$branch" | xargs)
+              [ -z "$branch" ] && continue
+              LAST_DATE=$(git log -1 --format="%at" "$branch" 2>/dev/null || echo 0)
+              if [ "$LAST_DATE" -gt 0 ] && [ "$LAST_DATE" -lt "$THREE_MONTHS_AGO" ]; then
+                echo "  🔴 ${branch#origin/}"
+              fi
+            done
+          } > /tmp/branch-analysis.txt
+          
+          # 安全检查
+          {
+            echo "=== 敏感文件检查 ==="
+            SENSITIVE_FOUND=false
+            for ext in pem key p12 pfx jks keystore env secret token; do
+              FILES=$(find . -type f -name "*.$ext" -not -path "./.git/*" 2>/dev/null)
+              if [ -n "$FILES" ]; then
+                echo "  ⚠️  发现 .$ext 文件:"
+                echo "$FILES" | sed 's/^/    /'
+                SENSITIVE_FOUND=true
+              fi
+            done
+            [ "$SENSITIVE_FOUND" = false ] && echo "  ✅ 未发现敏感文件"
+            echo ""
+            echo "=== Git配置检查 ==="
+            [ -f .gitignore ] && echo "  ✅ .gitignore 存在 ($(wc -l < .gitignore) 行)" || echo "  ⚠️  缺少 .gitignore"
+            [ -f .gitattributes ] && echo "  ✅ .gitattributes 存在" || echo "  ℹ️  缺少 .gitattributes"
+            [ -f README.md ] || [ -f README ] && echo "  ✅ README 存在" || echo "  ⚠️  缺少 README"
+          } > /tmp/security-check.txt
+          
+          # 健康评分
+          SCORE=100
+          ISSUES=""
+          
+          if [ ! -f .gitignore ]; then
+            SCORE=$((SCORE - 10))
+            ISSUES="${ISSUES}缺少 .gitignore 文件 (-10分)\n"
+          fi
+          
+          LARGE_COUNT=$(find . -type f -size +5M -not -path "./.git/*" 2>/dev/null | wc -l)
+          if [ "$LARGE_COUNT" -gt 0 ]; then
+            DEDUCTION=$((LARGE_COUNT * 5))
+            [ "$DEDUCTION" -gt 30 ] && DEDUCTION=30
+            SCORE=$((SCORE - DEDUCTION))
+            ISSUES="${ISSUES}存在 ${LARGE_COUNT} 个大文件 (>5MB) (-${DEDUCTION}分)\n"
+          fi
+          
+          SENSITIVE_COUNT=$(find . -type f \( -name "*.pem" -o -name "*.key" -o -name "*.env" -o -name "*.secret" -o -name "*.token" \) -not -path "./.git/*" 2>/dev/null | wc -l)
+          if [ "$SENSITIVE_COUNT" -gt 0 ]; then
+            SCORE=$((SCORE - 20))
+            ISSUES="${ISSUES}发现 ${SENSITIVE_COUNT} 个敏感文件 (-20分)\n"
+          fi
+          
+          if [ ! -f README.md ] && [ ! -f README ]; then
+            SCORE=$((SCORE - 5))
+            ISSUES="${ISSUES}缺少 README 文件 (-5分)\n"
+          fi
+          
+          [ "$SCORE" -lt 0 ] && SCORE=0
+          [ "$SCORE" -gt 100 ] && SCORE=100
+          
+          if [ "$SCORE" -ge 90 ]; then RATING="🟢 优秀"
+          elif [ "$SCORE" -ge 70 ]; then RATING="🟡 良好"
+          elif [ "$SCORE" -ge 50 ]; then RATING="🟠 需要改进"
+          else RATING="🔴 需要立即关注"
+          fi
+          
+          echo "SCORE=${SCORE}" >> $GITHUB_OUTPUT
+          echo "RATING=${RATING}" >> $GITHUB_OUTPUT
+          
+          {
+            echo "健康评分: ${SCORE}/100"
+            echo "评级: ${RATING}"
+            echo ""
+            if [ -n "$ISSUES" ]; then
+              echo "发现的问题："
+              printf "%b" "$ISSUES"
+            else
+              echo "✅ 未发现明显问题"
+            fi
+          } > /tmp/score-report.txt
+          
+          echo "评分: ${SCORE}/100 - ${RATING}"
+      
+      - name: 生成HTML邮件（使用Python）
+        run: |
+          python3 << 'PYTHON_SCRIPT'
+          import os
+          from datetime import datetime
+          import html
+          
+          def read_file(filepath):
+              try:
+                  with open(filepath, 'r', encoding='utf-8') as f:
+                      return f.read()
+              except:
+                  return "无数据"
+          
+          # 读取所有分析数据
+          score_report = read_file('/tmp/score-report.txt')
+          size_analysis = read_file('/tmp/size-analysis.txt')
+          file_analysis = read_file('/tmp/file-analysis.txt')
+          large_files = read_file('/tmp/large-files.txt')
+          activity_analysis = read_file('/tmp/activity-analysis.txt')
+          branch_analysis = read_file('/tmp/branch-analysis.txt')
+          security_check = read_file('/tmp/security-check.txt')
+          
+          # 基本信息
+          repo_name = os.environ.get('REPO_NAME', '${{ github.repository }}')
+          default_branch = os.environ.get('DEFAULT_BRANCH', '${{ steps.basic_info.outputs.DEFAULT_BRANCH }}')
+          repo_size = os.environ.get('REPO_SIZE', '${{ steps.basic_info.outputs.REPO_SIZE }}')
+          branch_count = os.environ.get('BRANCH_COUNT', '${{ steps.basic_info.outputs.BRANCH_COUNT }}')
+          total_commits = os.environ.get('TOTAL_COMMITS', '${{ steps.basic_info.outputs.TOTAL_COMMITS }}')
+          tag_count = os.environ.get('TAG_COUNT', '${{ steps.basic_info.outputs.TAG_COUNT }}')
+          contributors = os.environ.get('CONTRIBUTORS', '${{ steps.basic_info.outputs.CONTRIBUTORS }}')
+          score = os.environ.get('SCORE', '${{ steps.score.outputs.SCORE }}')
+          rating = os.environ.get('RATING', '${{ steps.score.outputs.RATING }}')
+          
+          generation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+          
+          html_content = f'''<!DOCTYPE html>
+          <html>
+          <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+          body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }}
+          .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+          .header h1 {{ margin: 0; font-size: 28px; }}
+          .header p {{ margin: 10px 0 0; opacity: 0.9; }}
+          .score-card {{ background: white; border-radius: 10px; padding: 30px; margin-bottom: 30px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+          .score-number {{ font-size: 72px; font-weight: bold; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; line-height: 1; }}
+          .score-rating {{ font-size: 24px; margin-top: 10px; }}
+          .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }}
+          .info-card {{ background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+          .info-label {{ font-size: 12px; color: #666; text-transform: uppercase; margin-bottom: 5px; font-weight: 600; }}
+          .info-value {{ font-size: 24px; font-weight: bold; color: #333; }}
+          .section {{ background: white; border-radius: 8px; padding: 25px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+          .section h2 {{ color: #24292e; margin-top: 0; padding-bottom: 10px; border-bottom: 2px solid #e1e4e8; }}
+          .section pre {{ background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 16px; overflow-x: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }}
+          .footer {{ text-align: center; color: #666; font-size: 12px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e1e4e8; }}
+          </style>
+          </head>
+          <body>
+          <div class="header">
+          <h1>🏥 仓库健康报告</h1>
+          <p>{repo_name} · {generation_time}</p>
+          </div>
+          
+          <div class="score-card">
+          <div class="score-number">{score}/100</div>
+          <div class="score-rating">{rating}</div>
+          </div>
+          
+          <div class="info-grid">
+          <div class="info-card"><div class="info-label">默认分支</div><div class="info-value">{default_branch}</div></div>
+          <div class="info-card"><div class="info-label">仓库大小</div><div class="info-value">{repo_size}</div></div>
+          <div class="info-card"><div class="info-label">分支数</div><div class="info-value">{branch_count}</div></div>
+          <div class="info-card"><div class="info-label">总提交数</div><div class="info-value">{total_commits}</div></div>
+          <div class="info-card"><div class="info-label">标签数</div><div class="info-value">{tag_count}</div></div>
+          <div class="info-card"><div class="info-label">贡献者</div><div class="info-value">{contributors}</div></div>
+          </div>
+          
+          <div class="section"><h2>📊 健康评分详情</h2><pre>{score_report}</pre></div>
+          <div class="section"><h2>📦 仓库存储分析</h2><pre>{size_analysis}</pre></div>
+          <div class="section"><h2>📁 文件类型分析</h2><pre>{file_analysis}</pre></div>
+          <div class="section"><h2>⚠️ 大文件检查</h2><pre>{large_files}</pre></div>
+          <div class="section"><h2>📈 提交活动分析</h2><pre>{activity_analysis}</pre></div>
+          <div class="section"><h2>🌿 分支分析</h2><pre>{branch_analysis}</pre></div>
+          <div class="section"><h2>🔒 安全检查</h2><pre>{security_check}</pre></div>
+          
+          <div class="footer">
+          <p>本报告由 GitHub Actions 自动生成</p>
+          <p>生成时间：{generation_time} · 下次检查：每周一早上8点</p>
+          <p>如有问题，请联系仓库管理员</p>
+          </div>
+          </body>
+          </html>'''
+          
+          with open('/tmp/email-content.html', 'w', encoding='utf-8') as f:
+              f.write(html_content)
+          
+          print("✅ HTML邮件内容生成成功")
+          PYTHON_SCRIPT
+        env:
+          REPO_NAME: ${{ steps.basic_info.outputs.REPO_NAME }}
+          DEFAULT_BRANCH: ${{ steps.basic_info.outputs.DEFAULT_BRANCH }}
+          REPO_SIZE: ${{ steps.basic_info.outputs.REPO_SIZE }}
+          BRANCH_COUNT: ${{ steps.basic_info.outputs.BRANCH_COUNT }}
+          TOTAL_COMMITS: ${{ steps.basic_info.outputs.TOTAL_COMMITS }}
+          TAG_COUNT: ${{ steps.basic_info.outputs.TAG_COUNT }}
+          CONTRIBUTORS: ${{ steps.basic_info.outputs.CONTRIBUTORS }}
+          SCORE: ${{ steps.basic_info.outputs.SCORE }}
+          RATING: ${{ steps.basic_info.outputs.RATING }}
+      
+      - name: 发送邮件
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_ADDRESS }}
+          server_port: ${{ secrets.MAIL_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "🏥 仓库健康报告 - ${{ github.repository }} - ${{ steps.basic_info.outputs.SCORE }}/100"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_USERNAME }}
+          html_body: file:///tmp/email-content.html
+          priority: normal
+      
+      - name: 发送完成确认
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ 仓库健康报告已生成并发送"
+          echo "=========================================="
+          echo ""
+          echo "📊 健康评分: ${{ steps.basic_info.outputs.SCORE }}/100"
+          echo "📧 报告已发送至: ${{ secrets.MAIL_TO }}"
+          echo "⏰ 下次自动检查: 每周一早上8点"
