@@ -1,0 +1,154 @@
+name: 分析仓库大文件（只读模式）
+
+on:
+  # 手动触发（推荐）
+  workflow_dispatch:
+    inputs:
+      size_threshold:
+        description: '文件大小阈值（单位：MB）'
+        required: false
+        default: '10'
+        type: string
+      include_current:
+        description: '是否包含当前工作目录的文件分析'
+        required: false
+        default: 'true'
+        type: boolean
+  
+  # 可选：定时运行（比如每周一早上9点）
+  schedule:
+    - cron: '0 9 * * 1'
+
+jobs:
+  analyze-large-files:
+    name: 分析大文件占用
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 检出仓库（完整历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史，包括所有分支和标签
+      
+      - name: 安装 Git LFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install git-lfs
+          git lfs install
+      
+      - name: 分析历史中的大文件
+        id: analyze-history
+        continue-on-error: false
+        run: |
+          echo "=========================================="
+          echo "📊 开始分析仓库历史中的大文件"
+          echo "=========================================="
+          echo ""
+          
+          # 获取阈值参数
+          THRESHOLD="${{
+            github.event.inputs.size_threshold || '10'
+          }}"
+          
+          echo "🔍 分析阈值: ${THRESHOLD}MB 以上的文件"
+          echo ""
+          
+          # 执行分析
+          git lfs migrate info --everything --above=${THRESHOLD}M > large-files-report.txt 2>&1
+          
+          # 显示报告内容
+          cat large-files-report.txt
+          
+          # 保存阈值供后续步骤使用
+          echo "threshold=${THRESHOLD}" >> $GITHUB_OUTPUT
+      
+      - name: 生成详细统计报告
+        run: |
+          echo "=========================================="
+          echo "📈 生成详细统计报告"
+          echo "=========================================="
+          echo ""
+          
+          # 获取所有历史对象的大小统计
+          echo "### 仓库整体统计" > detailed-report.md
+          echo "" >> detailed-report.md
+          echo "\`\`\`" >> detailed-report.md
+          git count-objects -vH >> detailed-report.md
+          echo "\`\`\`" >> detailed-report.md
+          echo "" >> detailed-report.md
+          
+          # 分析最大的10个文件
+          echo "### 历史中最大的10个文件" >> detailed-report.md
+          echo "" >> detailed-report.md
+          echo "\`\`\`" >> detailed-report.md
+          git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
+            awk '/^blob/ {print substr($0,6)}' | \
+            sort --numeric-sort --key=2 | \
+            tail -10 >> detailed-report.md
+          echo "\`\`\`" >> detailed-report.md
+          echo "" >> detailed-report.md
+          
+          # 分析当前工作目录的大文件
+          if [ "${{ github.event.inputs.include_current }}" = "true" ]; then
+            echo "### 当前工作目录中大于1MB的文件" >> detailed-report.md
+            echo "" >> detailed-report.md
+            echo "\`\`\`" >> detailed-report.md
+            find . -type f -size +1M -not -path "./.git/*" -exec ls -lh {} \; | \
+              awk '{print $5 "\t" $9}' | \
+              sort -hr >> detailed-report.md 2>/dev/null || echo "未发现大于1MB的文件" >> detailed-report.md
+            echo "\`\`\`" >> detailed-report.md
+          fi
+          
+          # 检查历史中的二进制文件
+          echo "" >> detailed-report.md
+          echo "### 历史中的文件类型统计" >> detailed-report.md
+          echo "" >> detailed-report.md
+          echo "\`\`\`" >> detailed-report.md
+          git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(rest)' | \
+            awk '/^blob/ {print $2}' | \
+            sed 's/.*\.//' | \
+            sort | \
+            uniq -c | \
+            sort -rn | \
+            head -20 >> detailed-report.md
+          echo "\`\`\`" >> detailed-report.md
+          
+          # 生成总结
+          echo "" >> detailed-report.md
+          echo "## 📋 分析总结" >> detailed-report.md
+          echo "" >> detailed-report.md
+          echo "- 分析时间: $(date '+%Y-%m-%d %H:%M:%S')" >> detailed-report.md
+          echo "- 阈值设置: ${THRESHOLD}MB" >> detailed-report.md
+          echo "- ⚠️ 此报告仅用于分析，未执行任何删除操作" >> detailed-report.md
+      
+      - name: 上传分析报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-files-analysis
+          path: |
+            large-files-report.txt
+            detailed-report.md
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: 输出简要总结
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ 分析完成"
+          echo "=========================================="
+          echo ""
+          echo "📁 报告已保存为 Artifact: large-files-analysis"
+          echo "   - large-files-report.txt: Git LFS 分析结果"
+          echo "   - detailed-report.md: 详细统计数据"
+          echo ""
+          echo "💡 下一步建议："
+          echo "   1. 下载并查看分析报告"
+          echo "   2. 确认哪些文件可以安全删除"
+          echo "   3. 运行清理工作流（需要单独配置）"
+          echo ""
+          echo "🔗 查看报告："
+          echo "   -> 在 Actions 页面 -> 当前运行 -> Artifacts"
+          echo ""
