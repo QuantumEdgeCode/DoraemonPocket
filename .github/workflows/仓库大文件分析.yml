@@ -1,23 +1,13 @@
 name: 分析仓库大文件（只读模式）
 
 on:
-  # 手动触发（推荐）
   workflow_dispatch:
     inputs:
       size_threshold:
         description: '文件大小阈值（单位：MB）'
         required: false
-        default: '10'
+        default: '5'
         type: string
-      include_current:
-        description: '是否包含当前工作目录的文件分析'
-        required: false
-        default: 'true'
-        type: boolean
-  
-  # 可选：定时运行（比如每周一早上9点）
-  schedule:
-    - cron: '0 9 * * 1'
 
 jobs:
   analyze-large-files:
@@ -28,127 +18,247 @@ jobs:
       - name: 检出仓库（完整历史）
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 获取完整历史，包括所有分支和标签
+          fetch-depth: 0  # 获取完整历史
       
-      - name: 安装 Git LFS
-        run: |
-          sudo apt-get update
-          sudo apt-get install git-lfs
-          git lfs install
-      
-      - name: 分析历史中的大文件
-        id: analyze-history
-        continue-on-error: false
+      - name: 分析历史中的所有大文件（Git原生方式）
+        id: analyze
         run: |
           echo "=========================================="
           echo "📊 开始分析仓库历史中的大文件"
           echo "=========================================="
           echo ""
           
-          # 获取阈值参数
-          THRESHOLD="${{
-            github.event.inputs.size_threshold || '10'
-          }}"
+          THRESHOLD="${{ github.event.inputs.size_threshold || '5' }}"
+          # 转换为字节（MB * 1024 * 1024）
+          THRESHOLD_BYTES=$((THRESHOLD * 1024 * 1024))
           
           echo "🔍 分析阈值: ${THRESHOLD}MB 以上的文件"
+          echo "📏 阈值字节数: ${THRESHOLD_BYTES}"
           echo ""
           
-          # 执行分析
-          git lfs migrate info --everything --above=${THRESHOLD}M > large-files-report.txt 2>&1
-          
-          # 显示报告内容
-          cat large-files-report.txt
-          
-          # 保存阈值供后续步骤使用
-          echo "threshold=${THRESHOLD}" >> $GITHUB_OUTPUT
-      
-      - name: 生成详细统计报告
-        run: |
+          # 方法1：使用 git rev-list 查找所有 blob 对象
           echo "=========================================="
-          echo "📈 生成详细统计报告"
+          echo "📁 历史中所有大于 ${THRESHOLD}MB 的文件"
           echo "=========================================="
           echo ""
           
-          # 获取所有历史对象的大小统计
-          echo "### 仓库整体统计" > detailed-report.md
-          echo "" >> detailed-report.md
-          echo "\`\`\`" >> detailed-report.md
-          git count-objects -vH >> detailed-report.md
-          echo "\`\`\`" >> detailed-report.md
-          echo "" >> detailed-report.md
-          
-          # 分析最大的10个文件
-          echo "### 历史中最大的10个文件" >> detailed-report.md
-          echo "" >> detailed-report.md
-          echo "\`\`\`" >> detailed-report.md
           git rev-list --objects --all | \
-            git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
-            awk '/^blob/ {print substr($0,6)}' | \
-            sort --numeric-sort --key=2 | \
-            tail -10 >> detailed-report.md
-          echo "\`\`\`" >> detailed-report.md
-          echo "" >> detailed-report.md
+            git cat-file --batch-check='%(objecttype) %(objectsize) %(objectname) %(rest)' | \
+            awk -v threshold="$THRESHOLD_BYTES" '
+              /^blob/ && $2 > threshold {
+                size_mb = $2 / 1024 / 1024
+                printf "%.2f MB\t%s\t%s\n", size_mb, $3, substr($0, index($0,$4))
+              }
+            ' | sort -hr > large-files-list.txt
           
-          # 分析当前工作目录的大文件
-          if [ "${{ github.event.inputs.include_current }}" = "true" ]; then
-            echo "### 当前工作目录中大于1MB的文件" >> detailed-report.md
-            echo "" >> detailed-report.md
-            echo "\`\`\`" >> detailed-report.md
-            find . -type f -size +1M -not -path "./.git/*" -exec ls -lh {} \; | \
-              awk '{print $5 "\t" $9}' | \
-              sort -hr >> detailed-report.md 2>/dev/null || echo "未发现大于1MB的文件" >> detailed-report.md
-            echo "\`\`\`" >> detailed-report.md
+          # 显示结果
+          if [ -s large-files-list.txt ]; then
+            echo "找到以下大文件："
+            echo ""
+            cat large-files-list.txt
+            echo ""
+            
+            # 统计信息
+            TOTAL_FILES=$(wc -l < large-files-list.txt)
+            TOTAL_SIZE=$(awk '{sum += $1} END {printf "%.2f", sum}' large-files-list.txt)
+            echo "📊 统计："
+            echo "   - 大文件数量: ${TOTAL_FILES}"
+            echo "   - 总大小: ${TOTAL_SIZE} MB"
+          else
+            echo "✅ 未发现大于 ${THRESHOLD}MB 的文件"
+            echo "无大文件" > large-files-list.txt
           fi
           
-          # 检查历史中的二进制文件
-          echo "" >> detailed-report.md
-          echo "### 历史中的文件类型统计" >> detailed-report.md
-          echo "" >> detailed-report.md
-          echo "\`\`\`" >> detailed-report.md
+          echo "threshold=${THRESHOLD}" >> $GITHUB_OUTPUT
+      
+      - name: 分析当前代码中的大文件
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📁 当前工作目录中的大文件"
+          echo "=========================================="
+          echo ""
+          
+          find . -type f -size +5M -not -path "./.git/*" -exec ls -lh {} \; | \
+            awk '{print $5 "\t" $9}' | \
+            sort -hr > current-large-files.txt
+          
+          if [ -s current-large-files.txt ]; then
+            echo "当前代码中包含以下大文件："
+            echo ""
+            cat current-large-files.txt
+            echo ""
+            echo "⚠️  注意：这些文件当前存在于仓库中"
+            echo "   如果要删除它们，需要先从代码中移除"
+          else
+            echo "✅ 当前代码中没有大于 5MB 的文件"
+            echo "无大文件" > current-large-files.txt
+          fi
+      
+      - name: 分析文件类型分布
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 历史中的文件类型统计"
+          echo "=========================================="
+          echo ""
+          
           git rev-list --objects --all | \
             git cat-file --batch-check='%(objecttype) %(rest)' | \
             awk '/^blob/ {print $2}' | \
             sed 's/.*\.//' | \
+            grep -v '/\|^$' | \
             sort | \
             uniq -c | \
             sort -rn | \
-            head -20 >> detailed-report.md
-          echo "\`\`\`" >> detailed-report.md
+            head -20 > file-types.txt
           
-          # 生成总结
-          echo "" >> detailed-report.md
-          echo "## 📋 分析总结" >> detailed-report.md
-          echo "" >> detailed-report.md
-          echo "- 分析时间: $(date '+%Y-%m-%d %H:%M:%S')" >> detailed-report.md
-          echo "- 阈值设置: ${THRESHOLD}MB" >> detailed-report.md
-          echo "- ⚠️ 此报告仅用于分析，未执行任何删除操作" >> detailed-report.md
+          if [ -s file-types.txt ]; then
+            echo "最常见的文件类型（按历史版本数量）："
+            echo ""
+            awk '{printf "   %5d 个版本  .%s\n", $1, $2}' file-types.txt
+          else
+            echo "无法统计文件类型"
+          fi
+      
+      - name: 找出已删除但占用历史的大文件
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🎯 已从当前代码中删除的历史大文件"
+          echo "=========================================="
+          echo ""
+          
+          # 获取当前存在的文件列表
+          git ls-tree -r HEAD | awk '{print $4}' > current-files.txt
+          
+          # 找出历史中存在但当前不存在的文件
+          if [ -s large-files-list.txt ]; then
+            echo "以下大文件已在当前代码中删除，但仍占用历史空间："
+            echo ""
+            
+            while read -r line; do
+              filename=$(echo "$line" | awk '{print $3}')
+              if ! grep -q "^${filename}$" current-files.txt 2>/dev/null; then
+                echo "  $line"
+                echo "$line" >> removable-files.txt
+              fi
+            done < large-files-list.txt
+            
+            if [ -f removable-files.txt ] && [ -s removable-files.txt ]; then
+              echo ""
+              COUNT=$(wc -l < removable-files.txt)
+              echo "📊 可清理的文件数量: ${COUNT}"
+              echo ""
+              echo "💡 这些文件可以安全地从 Git 历史中删除"
+              echo "   （因为它们已不在当前代码中）"
+            else
+              echo "✅ 没有发现可清理的历史大文件"
+              echo "   所有历史大文件都还在当前代码中"
+            fi
+          else
+            echo "没有大文件需要分析"
+          fi
+      
+      - name: 生成完整报告
+        run: |
+          cat > analysis-report.md << 'EOF'
+          # 仓库大文件分析报告
+          
+          ## 📋 基本信息
+          
+          EOF
+          
+          echo "- **分析时间**: $(date '+%Y-%m-%d %H:%M:%S')" >> analysis-report.md
+          echo "- **阈值**: ${{ github.event.inputs.size_threshold || '5' }} MB" >> analysis-report.md
+          echo "- **仓库**: ${{ github.repository }}" >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          echo "## 📊 仓库整体大小" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          git count-objects -vH >> analysis-report.md
+          echo '```' >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          echo "## 🎯 历史中的大文件（>${THRESHOLD}MB）" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          cat large-files-list.txt 2>/dev/null || echo "无" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          echo "## 📁 当前代码中的大文件" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          cat current-large-files.txt 2>/dev/null || echo "无" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          echo "## 🗑️ 可安全清理的历史文件（已从当前代码删除）" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          cat removable-files.txt 2>/dev/null || echo "无" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          echo "## 📈 文件类型统计" >> analysis-report.md
+          echo '```' >> analysis-report.md
+          cat file-types.txt 2>/dev/null | head -10 >> analysis-report.md
+          echo '```' >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          echo "## 💡 清理建议" >> analysis-report.md
+          echo "" >> analysis-report.md
+          
+          if [ -f removable-files.txt ] && [ -s removable-files.txt ]; then
+            COUNT=$(wc -l < removable-files.txt)
+            echo "✅ 发现 **${COUNT}** 个可以安全清理的历史大文件" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "这些文件已经不在当前代码中，删除它们不会影响当前仓库内容。" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "### 下一步操作：" >> analysis-report.md
+            echo "1. 使用 BFG Repo-Cleaner 清理这些文件" >> analysis-report.md
+            echo "2. 或者联系管理员执行清理操作" >> analysis-report.md
+          else
+            echo "⚠️ 没有发现可以安全清理的历史文件。" >> analysis-report.md
+            echo "" >> analysis-report.md
+            echo "当前代码中可能包含大文件，建议：" >> analysis-report.md
+            echo "1. 考虑使用 Git LFS 管理大文件" >> analysis-report.md
+            echo "2. 或者将大文件移到 .gitignore 中" >> analysis-report.md
+          fi
+          
+          echo "" >> analysis-report.md
+          echo "---" >> analysis-report.md
+          echo "*报告生成于 GitHub Actions*" >> analysis-report.md
       
       - name: 上传分析报告
         uses: actions/upload-artifact@v4
         with:
-          name: large-files-analysis
+          name: large-files-analysis-report
           path: |
-            large-files-report.txt
-            detailed-report.md
+            analysis-report.md
+            large-files-list.txt
+            current-large-files.txt
+            removable-files.txt
+            file-types.txt
           retention-days: 30
-          if-no-files-found: warn
       
-      - name: 输出简要总结
+      - name: 显示摘要
         run: |
           echo ""
           echo "=========================================="
           echo "✅ 分析完成"
           echo "=========================================="
           echo ""
-          echo "📁 报告已保存为 Artifact: large-files-analysis"
-          echo "   - large-files-report.txt: Git LFS 分析结果"
-          echo "   - detailed-report.md: 详细统计数据"
+          
+          # 显示关键信息
+          if [ -f removable-files.txt ] && [ -s removable-files.txt ]; then
+            COUNT=$(wc -l < removable-files.txt)
+            echo "🎯 发现 ${COUNT} 个可清理的历史大文件"
+            echo ""
+            echo "这些文件已不在当前代码中，可以安全删除"
+          else
+            echo "ℹ️  没有发现可清理的历史文件"
+          fi
+          
           echo ""
-          echo "💡 下一步建议："
-          echo "   1. 下载并查看分析报告"
-          echo "   2. 确认哪些文件可以安全删除"
-          echo "   3. 运行清理工作流（需要单独配置）"
+          echo "📁 完整报告已保存为 Artifact: large-files-analysis-report"
           echo ""
-          echo "🔗 查看报告："
-          echo "   -> 在 Actions 页面 -> 当前运行 -> Artifacts"
-          echo ""
+          echo "下载报告查看详细信息"
