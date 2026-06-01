@@ -1,18 +1,42 @@
+# ============================================================
+# 工作流名称：清理CSV历史记录
+# 功能：分析并清理已从当前代码中删除但仍占用Git历史的CSV文件
+# 触发方式：手动触发（workflow_dispatch）
+# 安全说明：所有敏感信息通过 GitHub Secrets 管理，日志中不打印任何机密信息
+# ============================================================
 name: 清理CSV历史记录
 
+# ============================================================
+# 触发条件配置
+# workflow_dispatch：手动触发，支持输入参数
+# ============================================================
 on:
   workflow_dispatch:
     inputs:
+      # 文件大小阈值参数
       size_threshold:
         description: '文件大小阈值（单位：MB），只清理大于此值的CSV'
         required: false
         default: '1'
         type: string
+      # 强制推送参数
       force_push:
         description: '强制推送到远程仓库'
         required: false
         default: false
         type: boolean
+
+# ============================================================
+# 环境变量配置（作业级别）
+# 从 GitHub Secrets 读取敏感信息，保护隐私安全
+# 注意：这些变量仅在作业内部使用，不会在日志中显示
+# ============================================================
+env:
+  MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
+  MAIL_PORT: ${{ secrets.MAIL_PORT }}
+  MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+  MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+  MAIL_TO: ${{ secrets.MAIL_TO }}
 
 jobs:
   clean-csv-history:
@@ -22,17 +46,26 @@ jobs:
       contents: write
     
     steps:
+      # ============================================================
+      # 步骤1：检出仓库代码
+      # ============================================================
       - name: 检出仓库（完整历史）
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
       
+      # ============================================================
+      # 步骤2：配置Git用户信息
+      # ============================================================
       - name: 配置Git用户信息
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
+      # ============================================================
+      # 步骤3：分析和清理CSV历史记录
+      # ============================================================
       - name: 分析并清理已删除的CSV历史记录
         id: clean
         run: |
@@ -41,20 +74,25 @@ jobs:
           echo "=========================================="
           echo ""
           
+          # 获取阈值并转换单位
           THRESHOLD="${{ github.event.inputs.size_threshold || '1' }}"
           THRESHOLD_BYTES=$((THRESHOLD * 1024 * 1024))
           
           echo "🔍 文件大小阈值: ${THRESHOLD}MB"
           echo ""
           
-          # 获取当前代码中的所有文件
+          # 记录清理前仓库大小
+          BEFORE_SIZE=$(git count-objects -vH 2>/dev/null | grep 'size-pack' | awk '{print $NF}' || echo "N/A")
+          echo "BEFORE_SIZE=${BEFORE_SIZE}" >> $GITHUB_OUTPUT
+          
+          # 获取当前代码中的所有文件列表
           echo "📋 获取当前代码文件列表..."
           git ls-tree -r HEAD --name-only | sort > /tmp/current-files.txt
           CURRENT_COUNT=$(wc -l < /tmp/current-files.txt)
           echo "  当前代码文件总数: ${CURRENT_COUNT}"
           echo ""
           
-          # 查找历史中所有已删除的CSV文件
+          # 扫描Git历史中所有的CSV文件
           echo "🔍 扫描历史中的CSV文件..."
           git rev-list --objects --all | \
             git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' | \
@@ -65,18 +103,20 @@ jobs:
               }
             ' | sort -hr > /tmp/all-csv-files.txt
           
+          # 如果没有找到符合条件的文件，提前退出
           if [ ! -s /tmp/all-csv-files.txt ]; then
             echo "✅ 没有找到大于 ${THRESHOLD}MB 的CSV历史文件"
             echo "HAS_FILES=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
+          # 统计找到的CSV文件
           TOTAL_CSV=$(wc -l < /tmp/all-csv-files.txt)
           TOTAL_SIZE=$(awk '{sum += $1} END {printf "%.2f", sum}' /tmp/all-csv-files.txt)
           echo "  找到 ${TOTAL_CSV} 个CSV历史对象，总大小 ${TOTAL_SIZE} MB"
           echo ""
           
-          # 找出已从当前代码中删除的CSV文件
+          # 筛选出已从当前代码中删除的CSV文件
           echo "🎯 筛选已从当前代码中删除的CSV文件..."
           > /tmp/csv-to-delete.txt
           > /tmp/csv-still-exists.txt
@@ -89,6 +129,7 @@ jobs:
             fi
           done < <(awk '{print $1 "\t" $2}' /tmp/all-csv-files.txt | sort -u -k2)
           
+          # 统计筛选结果
           DELETE_COUNT=$(wc -l < /tmp/csv-to-delete.txt 2>/dev/null || echo 0)
           STILL_EXISTS_COUNT=$(wc -l < /tmp/csv-still-exists.txt 2>/dev/null || echo 0)
           
@@ -98,32 +139,22 @@ jobs:
           echo "  - 仍在当前代码中的CSV文件: ${STILL_EXISTS_COUNT} 个"
           echo ""
           
+          # 如果没有需要删除的文件，提前退出
           if [ "$DELETE_COUNT" -eq 0 ]; then
             echo "✅ 没有需要清理的已删除CSV文件"
             echo "HAS_FILES=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # 显示将要清理的文件
-          echo "将要清理的已删除CSV文件："
-          echo ""
+          # 显示将要清理的文件列表（保存到文件用于邮件）
+          echo "将要清理的已删除CSV文件：" > /tmp/clean-summary.txt
           while IFS=$'\t' read -r size filepath; do
             if grep -qxF "$filepath" /tmp/csv-to-delete.txt; then
               printf "  ❌ %s MB  %s\n" "$size" "$filepath"
+              printf "  ❌ %s MB  %s\n" "$size" "$filepath" >> /tmp/clean-summary.txt
             fi
           done < <(awk '{print $1 "\t" $2}' /tmp/all-csv-files.txt | sort -u -k2)
           echo ""
-          
-          # 显示保留的文件
-          if [ "$STILL_EXISTS_COUNT" -gt 0 ]; then
-            echo "保留的文件（仍在当前代码中）："
-            while IFS=$'\t' read -r size filepath; do
-              if grep -qxF "$filepath" /tmp/csv-still-exists.txt; then
-                printf "  ✅ %s MB  %s\n" "$size" "$filepath"
-              fi
-            done < <(awk '{print $1 "\t" $2}' /tmp/all-csv-files.txt | sort -u -k2)
-            echo ""
-          fi
           
           # 计算可释放空间
           DELETE_SIZE=$(while IFS=$'\t' read -r size filepath; do
@@ -135,7 +166,7 @@ jobs:
           echo "💾 预计释放空间: ${DELETE_SIZE} MB"
           echo ""
           
-          # 安装并执行清理
+          # 执行历史清理
           echo "🛠️  开始清理历史记录..."
           sudo apt-get update -qq && sudo apt-get install -y -qq git-filter-repo
           
@@ -145,11 +176,43 @@ jobs:
             --force
           
           echo "✅ 历史清理完成"
+          
+          # 保存输出变量
           echo "HAS_FILES=true" >> $GITHUB_OUTPUT
           echo "DELETE_COUNT=${DELETE_COUNT}" >> $GITHUB_OUTPUT
           echo "DELETE_SIZE=${DELETE_SIZE}" >> $GITHUB_OUTPUT
           echo "STILL_EXISTS=${STILL_EXISTS_COUNT}" >> $GITHUB_OUTPUT
       
+      # ============================================================
+      # 步骤4：清理垃圾文件和优化仓库
+      # ============================================================
+      - name: 清理垃圾文件和优化仓库
+        if: steps.clean.outputs.HAS_FILES == 'true'
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🧹 清理垃圾文件和优化仓库"
+          echo "=========================================="
+          echo ""
+          
+          # 清理Git垃圾文件
+          rm -rf .git/objects/pack/tmp_pack_*
+          git gc --aggressive --prune=now
+          git repack -a -d -f --depth=250 --window=250
+          git gc --prune=now
+          git prune
+          
+          # 记录清理后仓库大小
+          AFTER_SIZE=$(git count-objects -vH 2>/dev/null | grep 'size-pack' | awk '{print $NF}' || echo "N/A")
+          echo "AFTER_SIZE=${AFTER_SIZE}" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "📊 优化后仓库大小："
+          git count-objects -vH
+      
+      # ============================================================
+      # 步骤5：验证清理结果
+      # ============================================================
       - name: 验证清理结果
         if: steps.clean.outputs.HAS_FILES == 'true'
         run: |
@@ -159,12 +222,11 @@ jobs:
           echo "=========================================="
           echo ""
           
-          # 检查仓库大小
           echo "📦 清理后仓库大小："
           git count-objects -vH
           echo ""
           
-          # 验证已删除的文件确实不在历史中
+          # 验证已删除的文件确实不在Git历史中
           echo "🔍 验证清理结果..."
           REMAINING=0
           while IFS= read -r filepath; do
@@ -182,7 +244,11 @@ jobs:
           echo ""
           echo "✅ 当前代码中的CSV文件未受影响"
       
+      # ============================================================
+      # 步骤6：推送清理后的仓库
+      # ============================================================
       - name: 推送清理后的仓库
+        id: push
         if: steps.clean.outputs.HAS_FILES == 'true' && github.event.inputs.force_push == 'true'
         run: |
           echo ""
@@ -191,83 +257,227 @@ jobs:
           echo "=========================================="
           echo ""
           
+          # 重新添加远程仓库（git filter-repo 会移除远程配置）
+          # 注意：Token不会在日志中显示，GitHub会自动屏蔽
           git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           
-          git push origin --force --all
-          git push origin --force --tags
+          # 配置大仓库推送优化
+          git config http.postBuffer 524288000
+          git config http.lowSpeedLimit 0
+          git config http.lowSpeedTime 999999
           
-          echo "✅ 已成功推送到远程仓库"
-          echo ""
-          echo "⚠️  所有协作者需要重新克隆仓库："
-          echo "   git clone https://github.com/${{ github.repository }}.git"
+          # 推送重试机制
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          PUSH_SUCCESS=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "推送尝试 $((RETRY_COUNT + 1))/$MAX_RETRIES ..."
+            
+            if git push origin --force --all && git push origin --force --tags; then
+              echo "✅ 推送成功"
+              PUSH_SUCCESS=true
+              break
+            fi
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "⚠️  推送失败，等待30秒后重试..."
+              sleep 30
+              git gc --aggressive --prune=now
+              git repack -a -d -f --depth=250 --window=250
+            fi
+          done
+          
+          echo "PUSH_SUCCESS=${PUSH_SUCCESS}" >> $GITHUB_OUTPUT
+          
+          if [ "$PUSH_SUCCESS" = "true" ]; then
+            echo ""
+            echo "✅ 已成功推送到远程仓库"
+            echo ""
+            echo "⚠️  所有协作者需要重新克隆仓库"
+          else
+            echo ""
+            echo "❌ 推送失败，请查看邮件了解手动推送方法"
+            exit 1
+          fi
       
-      - name: 生成报告
+      # ============================================================
+      # 步骤7：生成HTML邮件内容（Python）
+      # ============================================================
+      - name: 生成邮件内容
         if: always()
         run: |
-          mkdir -p /tmp/report
+          python3 << 'PYTHON_SCRIPT'
+          import os
+          from datetime import datetime
           
-          cat > /tmp/report/csv-cleanup-report.md << EOF
-          # 🗑️ CSV历史记录清理报告
+          # 安全读取文件内容
+          def read_file(filepath):
+              try:
+                  with open(filepath, 'r', encoding='utf-8') as f:
+                      return f.read().strip()
+              except:
+                  return ""
           
-          ## 📋 基本信息
+          # 获取基本信息（不包含任何敏感信息）
+          repo_name = os.environ.get('GITHUB_REPOSITORY', 'Unknown')
+          generation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+          threshold = os.environ.get('THRESHOLD', '1')
+          force_push = os.environ.get('FORCE_PUSH', 'false')
           
-          - **清理时间**: $(date '+%Y-%m-%d %H:%M:%S')
-          - **仓库**: ${{ github.repository }}
-          - **大小阈值**: ${{ github.event.inputs.size_threshold || '1' }} MB
-          - **是否推送**: ${{ github.event.inputs.force_push == 'true' && '是 ✅' || '否 ❌' }}
+          # 获取清理统计
+          has_files = os.environ.get('HAS_FILES', 'false')
+          delete_count = os.environ.get('DELETE_COUNT', '0')
+          delete_size = os.environ.get('DELETE_SIZE', '0')
+          still_exists = os.environ.get('STILL_EXISTS', '0')
+          before_size = os.environ.get('BEFORE_SIZE', 'N/A')
+          after_size = os.environ.get('AFTER_SIZE', 'N/A')
+          push_success = os.environ.get('PUSH_SUCCESS', 'false')
           
-          ## 📊 清理统计
+          # 读取文件列表
+          clean_summary = read_file('/tmp/clean-summary.txt')
+          csv_files = read_file('/tmp/all-csv-files.txt')
           
-          EOF
+          # 确定状态
+          if has_files != 'true':
+              status = "无需清理"
+              status_emoji = "✅"
+              status_color = "#28a745"
+          elif force_push == 'true' and push_success == 'true':
+              status = "清理并推送成功"
+              status_emoji = "🎉"
+              status_color = "#28a745"
+          elif force_push == 'true' and push_success != 'true':
+              status = "清理成功，推送失败"
+              status_emoji = "⚠️"
+              status_color = "#ffc107"
+          else:
+              status = "清理完成，未推送"
+              status_emoji = "💡"
+              status_color = "#17a2b8"
           
-          if [ "${{ steps.clean.outputs.HAS_FILES }}" = "true" ]; then
-            echo "- **已清理文件数**: ${{ steps.clean.outputs.DELETE_COUNT }}" >> /tmp/report/csv-cleanup-report.md
-            echo "- **释放空间**: ${{ steps.clean.outputs.DELETE_SIZE }} MB" >> /tmp/report/csv-cleanup-report.md
-            echo "- **保留的文件**: ${{ steps.clean.outputs.STILL_EXISTS }} 个（仍在代码中）" >> /tmp/report/csv-cleanup-report.md
-            echo "" >> /tmp/report/csv-cleanup-report.md
-            
-            if [ -f /tmp/csv-to-delete.txt ]; then
-              echo "## ❌ 已清理的文件" >> /tmp/report/csv-cleanup-report.md
-              echo '```' >> /tmp/report/csv-cleanup-report.md
-              cat /tmp/csv-to-delete.txt >> /tmp/report/csv-cleanup-report.md
-              echo '```' >> /tmp/report/csv-cleanup-report.md
-            fi
-          else
-            echo "- **清理结果**: 无需清理" >> /tmp/report/csv-cleanup-report.md
-          fi
+          # 生成HTML邮件
+          html_content = f'''<!DOCTYPE html>
+          <html>
+          <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+          body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }}
+          .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+          .header h1 {{ margin: 0; font-size: 28px; }}
+          .header p {{ margin: 10px 0 0; opacity: 0.9; }}
+          .status-card {{ background: {status_color}; color: white; border-radius: 10px; padding: 20px; margin-bottom: 30px; text-align: center; font-size: 20px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+          .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }}
+          .info-card {{ background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+          .info-label {{ font-size: 12px; color: #666; text-transform: uppercase; margin-bottom: 5px; font-weight: 600; }}
+          .info-value {{ font-size: 24px; font-weight: bold; color: #333; }}
+          .section {{ background: white; border-radius: 8px; padding: 25px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+          .section h2 {{ color: #24292e; margin-top: 0; padding-bottom: 10px; border-bottom: 2px solid #e1e4e8; }}
+          .section pre {{ background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 16px; overflow-x: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; font-family: 'Courier New', monospace; }}
+          .warning {{ background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 15px; margin-bottom: 20px; color: #856404; }}
+          .warning strong {{ color: #856404; }}
+          .footer {{ text-align: center; color: #666; font-size: 12px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e1e4e8; }}
+          .list-item {{ font-family: 'Courier New', monospace; font-size: 13px; line-height: 1.8; }}
+          </style>
+          </head>
+          <body>
+          <div class="header">
+          <h1>🗑️ CSV历史记录清理报告</h1>
+          <p>{repo_name} · {generation_time}</p>
+          </div>
           
-          echo "" >> /tmp/report/csv-cleanup-report.md
-          echo "## 📌 重要提示" >> /tmp/report/csv-cleanup-report.md
-          echo "" >> /tmp/report/csv-cleanup-report.md
+          <div class="status-card">
+          {status_emoji} {status}
+          </div>
           
-          if [ "${{ github.event.inputs.force_push }}" = "true" ]; then
-            echo "⚠️  历史已重写，所有协作者需执行：" >> /tmp/report/csv-cleanup-report.md
-            echo '```bash' >> /tmp/report/csv-cleanup-report.md
-            echo "git fetch origin" >> /tmp/report/csv-cleanup-report.md
-            echo "git reset --hard origin/main" >> /tmp/report/csv-cleanup-report.md
-            echo "git clean -fd" >> /tmp/report/csv-cleanup-report.md
-            echo '```' >> /tmp/report/csv-cleanup-report.md
-          else
-            echo "💡 清理在本地完成但未推送，手动推送命令：" >> /tmp/report/csv-cleanup-report.md
-            echo '```bash' >> /tmp/report/csv-cleanup-report.md
-            echo "git push origin --force --all" >> /tmp/report/csv-cleanup-report.md
-            echo "git push origin --force --tags" >> /tmp/report/csv-cleanup-report.md
-            echo '```' >> /tmp/report/csv-cleanup-report.md
-          fi
+          <div class="info-grid">
+          <div class="info-card"><div class="info-label">清理前大小</div><div class="info-value">{before_size}</div></div>
+          <div class="info-card"><div class="info-label">清理后大小</div><div class="info-value">{after_size}</div></div>
+          <div class="info-card"><div class="info-label">已清理文件</div><div class="info-value">{delete_count} 个</div></div>
+          <div class="info-card"><div class="info-label">释放空间</div><div class="info-value">{delete_size} MB</div></div>
+          <div class="info-card"><div class="info-label">保留文件</div><div class="info-value">{still_exists} 个</div></div>
+          <div class="info-card"><div class="info-label">大小阈值</div><div class="info-value">{threshold} MB</div></div>
+          </div>
           
-          # 复制分析文件到报告目录
-          cp /tmp/all-csv-files.txt /tmp/report/ 2>/dev/null || true
-          cp /tmp/csv-to-delete.txt /tmp/report/ 2>/dev/null || true
-          cp /tmp/csv-still-exists.txt /tmp/report/ 2>/dev/null || true
+          <div class="section">
+          <h2>📋 清理详情</h2>
+          <pre class="list-item">{clean_summary if clean_summary else '无需清理的文件'}</pre>
+          </div>'''
+          
+          # 根据推送状态添加警告
+          if force_push == 'true' and push_success == 'true':
+              html_content += f'''
+          <div class="warning">
+          <strong>⚠️ 重要通知：</strong>历史已被重写并推送到远程仓库。所有协作者必须重新克隆仓库。
+          </div>'''
+          elif force_push == 'true' and push_success != 'true':
+              html_content += f'''
+          <div class="warning">
+          <strong>⚠️ 推送失败：</strong>请在本地手动推送，或联系管理员处理。
+          </div>'''
+          elif has_files == 'true':
+              html_content += '''
+          <div class="warning">
+          <strong>💡 提示：</strong>清理已完成但未推送。确认无误后重新运行工作流并设置 <code>force_push=true</code>
+          </div>'''
+          
+          html_content += f'''
+          <div class="section">
+          <h2>📊 所有CSV历史文件</h2>
+          <pre>{csv_files if csv_files else '无CSV文件'}</pre>
+          </div>
+          
+          <div class="footer">
+          <p>本报告由 GitHub Actions 自动生成</p>
+          <p>生成时间：{generation_time}</p>
+          <p>仓库：{repo_name}</p>
+          </div>
+          </body>
+          </html>'''
+          
+          # 写入HTML文件
+          with open('/tmp/email-content.html', 'w', encoding='utf-8') as f:
+              f.write(html_content)
+          
+          print("✅ HTML邮件内容生成成功")
+          PYTHON_SCRIPT
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          THRESHOLD: ${{ github.event.inputs.size_threshold || '1' }}
+          FORCE_PUSH: ${{ github.event.inputs.force_push || 'false' }}
+          HAS_FILES: ${{ steps.clean.outputs.HAS_FILES || 'false' }}
+          DELETE_COUNT: ${{ steps.clean.outputs.DELETE_COUNT || '0' }}
+          DELETE_SIZE: ${{ steps.clean.outputs.DELETE_SIZE || '0' }}
+          STILL_EXISTS: ${{ steps.clean.outputs.STILL_EXISTS || '0' }}
+          BEFORE_SIZE: ${{ steps.clean.outputs.BEFORE_SIZE || 'N/A' }}
+          AFTER_SIZE: ${{ steps.clean.outputs.AFTER_SIZE || 'N/A' }}
+          PUSH_SUCCESS: ${{ steps.push.outputs.PUSH_SUCCESS || 'false' }}
       
-      - name: 上传清理报告
+      # ============================================================
+      # 步骤8：发送邮件通知
+      # 所有邮箱配置来自Secrets，不会在日志中显示
+      # ============================================================
+      - name: 发送邮件通知
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: dawidd6/action-send-mail@v3
         with:
-          name: csv-cleanup-report
-          path: /tmp/report
-          retention-days: 30
+          server_address: ${{ secrets.MAIL_ADDRESS }}
+          server_port: ${{ secrets.MAIL_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "🗑️ CSV清理报告 - ${{ github.repository }} - ${{ steps.clean.outputs.DELETE_COUNT || 0 }}个文件已清理"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_USERNAME }}
+          html_body: file:///tmp/email-content.html
+          priority: normal
       
+      # ============================================================
+      # 步骤9：显示最终摘要
+      # 安全注意：不打印任何敏感信息（邮箱、Token等）
+      # ============================================================
       - name: 显示最终摘要
         if: always()
         run: |
@@ -277,23 +487,31 @@ jobs:
           echo "=========================================="
           echo ""
           
+          # 显示清理结果（不包含任何敏感信息）
           if [ "${{ steps.clean.outputs.HAS_FILES }}" = "true" ]; then
             echo "🗑️  清理结果："
-            echo "   - 已清理: ${{ steps.clean.outputs.DELETE_COUNT }} 个已删除的CSV历史记录"
+            echo "   - 已清理文件数: ${{ steps.clean.outputs.DELETE_COUNT }} 个"
             echo "   - 释放空间: ${{ steps.clean.outputs.DELETE_SIZE }} MB"
-            echo "   - 保留: ${{ steps.clean.outputs.STILL_EXISTS }} 个CSV文件（仍在代码中）"
+            echo "   - 保留文件数: ${{ steps.clean.outputs.STILL_EXISTS }} 个（仍在代码中）"
             echo ""
             
+            # 显示推送状态
             if [ "${{ github.event.inputs.force_push }}" = "true" ]; then
-              echo "🚀 已推送到远程仓库"
-              echo "⚠️  请通知所有协作者重新克隆仓库"
+              if [ "${{ steps.push.outputs.PUSH_SUCCESS }}" = "true" ]; then
+                echo "🚀 推送状态: 成功"
+                echo "⚠️  请通知所有协作者重新克隆仓库"
+              else
+                echo "❌ 推送状态: 失败"
+                echo "📧 请查看邮件了解详情"
+              fi
             else
               echo "💡 清理已完成但未推送"
               echo "   确认无误后重新运行并设置 force_push=true"
             fi
           else
-            echo "ℹ️  没有需要清理的已删除CSV历史记录"
+            echo "ℹ️  无需清理的文件"
           fi
           
           echo ""
-          echo "📁 完整报告已保存为 Artifact: csv-cleanup-report"
+          echo "📧 详细报告已通过邮件发送"
+          echo "🔒 敏感信息已自动隐藏"
