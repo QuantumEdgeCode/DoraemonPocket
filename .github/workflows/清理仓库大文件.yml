@@ -1,0 +1,277 @@
+name: 清理仓库大文件
+
+on:
+  workflow_dispatch:
+    inputs:
+      size_threshold:
+        description: '文件大小阈值（单位：MB）'
+        required: false
+        default: '5'
+        type: string
+      force_push:
+        description: '强制推送到远程仓库'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  clean-large-files:
+    name: 清理历史大文件
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 检出仓库（完整历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 配置 Git 用户信息
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: 分析并清理历史大文件
+        id: clean
+        run: |
+          echo "=========================================="
+          echo "🗑️  开始分析并清理历史大文件"
+          echo "=========================================="
+          echo ""
+          
+          THRESHOLD="${{ github.event.inputs.size_threshold || '5' }}"
+          THRESHOLD_BYTES=$((THRESHOLD * 1024 * 1024))
+          
+          echo "🔍 分析阈值: ${THRESHOLD}MB 以上的文件"
+          echo "📏 阈值字节数: ${THRESHOLD_BYTES}"
+          echo ""
+          
+          # 获取当前 HEAD 的文件列表
+          git ls-tree -r HEAD | awk '{print $4}' > current-files.txt
+          
+          # 查找历史中的大文件（仅 blob 对象）
+          echo "📊 正在扫描历史记录中的大文件..."
+          git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(objectsize) %(objectname) %(rest)' | \
+            awk -v threshold="$THRESHOLD_BYTES" '
+              /^blob/ && $2 > threshold {
+                size_mb = $2 / 1024 / 1024
+                printf "%.2f MB\t%s\t%s\n", size_mb, $3, substr($0, index($0,$4))
+              }
+            ' | sort -hr > all-large-files.txt
+          
+          # 找出可清理的文件（不在当前代码中）
+          > files-to-delete.txt
+          > files-kept.txt
+          
+          if [ -s all-large-files.txt ]; then
+            while IFS=$'\t' read -r size hash filepath; do
+              if ! grep -qxF "$filepath" current-files.txt 2>/dev/null; then
+                echo "$filepath" >> files-to-delete.txt
+              else
+                echo "$filepath" >> files-kept.txt
+              fi
+            done < all-large-files.txt
+          fi
+          
+          # 显示清理结果
+          if [ -s files-to-delete.txt ]; then
+            DELETE_COUNT=$(wc -l < files-to-delete.txt)
+            DELETE_SIZE=$(awk '{sum += $1} END {printf "%.2f", sum}' all-large-files.txt)
+            
+            echo ""
+            echo "🎯 发现 ${DELETE_COUNT} 个可清理的历史大文件："
+            echo ""
+            while IFS=$'\t' read -r size hash filepath; do
+              if grep -qxF "$filepath" files-to-delete.txt; then
+                echo "  ❌ ${size} MB - ${filepath}"
+              fi
+            done < all-large-files.txt
+            echo ""
+            echo "📊 预计清理空间: ${DELETE_SIZE} MB"
+            
+            # 使用 git filter-repo 清理文件
+            echo ""
+            echo "🛠️  开始清理历史记录..."
+            
+            # 安装 git-filter-repo
+            sudo apt-get update -qq && sudo apt-get install -y -qq git-filter-repo
+            
+            # 执行清理
+            git filter-repo \
+              --invert-paths \
+              --paths-from-file files-to-delete.txt \
+              --force
+            
+            echo "✅ 历史清理完成"
+            echo "cleaned=true" >> $GITHUB_OUTPUT
+            echo "delete_count=${DELETE_COUNT}" >> $GITHUB_OUTPUT
+            echo "delete_size=${DELETE_SIZE}" >> $GITHUB_OUTPUT
+          else
+            echo ""
+            echo "✅ 没有发现可清理的历史大文件"
+            echo "cleaned=false" >> $GITHUB_OUTPUT
+            echo "delete_count=0" >> $GITHUB_OUTPUT
+            echo "delete_size=0" >> $GITHUB_OUTPUT
+          fi
+          
+          # 保存当前文件列表
+          if [ -s files-kept.txt ]; then
+            KEPT_COUNT=$(wc -l < files-kept.txt)
+            echo "kept_count=${KEPT_COUNT}" >> $GITHUB_OUTPUT
+          else
+            echo "kept_count=0" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 显示清理后的状态
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 清理后仓库状态"
+          echo "=========================================="
+          echo ""
+          
+          # 显示仓库大小
+          echo "📦 仓库大小："
+          git count-objects -vH
+          echo ""
+          
+          # 验证清理结果
+          THRESHOLD="${{ github.event.inputs.size_threshold || '5' }}"
+          THRESHOLD_BYTES=$((THRESHOLD * 1024 * 1024))
+          
+          echo "🔍 验证清理结果..."
+          REMAINING=$(git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' | \
+            awk -v threshold="$THRESHOLD_BYTES" '
+              /^blob/ && $2 > threshold {count++} END {print count+0}
+            ')
+          
+          if [ "$REMAINING" -eq 0 ]; then
+            echo "✅ 所有大于 ${THRESHOLD}MB 的历史文件已清理完毕"
+          else
+            echo "⚠️  仍有 ${REMAINING} 个大于 ${THRESHOLD}MB 的文件（可能存在于当前代码中）"
+          fi
+      
+      - name: 推送清理后的仓库
+        if: steps.clean.outputs.cleaned == 'true' && github.event.inputs.force_push == 'true'
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🚀 推送清理后的历史到远程仓库"
+          echo "=========================================="
+          echo ""
+          
+          # 强制推送（因为历史被重写了）
+          git push origin --force --all
+          git push origin --force --tags
+          
+          echo "✅ 已成功推送到远程仓库"
+          echo ""
+          echo "⚠️  注意：所有协作者需要重新克隆仓库"
+          echo "   执行以下命令重新获取代码："
+          echo "   git clone ${{ github.server_url }}/${{ github.repository }}.git"
+      
+      - name: 生成清理报告
+        run: |
+          cat > cleanup-report.md << EOF
+          # 🗑️ 仓库大文件清理报告
+          
+          ## 📋 基本信息
+          
+          - **清理时间**: $(date '+%Y-%m-%d %H:%M:%S')
+          - **文件大小阈值**: ${{ github.event.inputs.size_threshold || '5' }} MB
+          - **仓库**: ${{ github.repository }}
+          - **是否已推送**: ${{ github.event.inputs.force_push == 'true' && '是' || '否' }}
+          
+          ## 🎯 清理结果
+          
+          EOF
+          
+          if [ "${{ steps.clean.outputs.cleaned }}" = "true" ]; then
+            echo "- **已清理文件数**: ${{ steps.clean.outputs.delete_count }}" >> cleanup-report.md
+            echo "- **保留的大文件数**: ${{ steps.clean.outputs.kept_count }}" >> cleanup-report.md
+            echo "" >> cleanup-report.md
+            echo "## ❌ 已从历史中删除的文件" >> cleanup-report.md
+            echo '```' >> cleanup-report.md
+            cat files-to-delete.txt >> cleanup-report.md
+            echo '```' >> cleanup-report.md
+            echo "" >> cleanup-report.md
+            echo "## ⚠️ 保留的文件（仍在当前代码中）" >> cleanup-report.md
+            echo '```' >> cleanup-report.md
+            cat files-kept.txt >> cleanup-report.md
+            echo '```' >> cleanup-report.md
+          else
+            echo "- **清理结果**: 无需清理" >> cleanup-report.md
+            echo "" >> cleanup-report.md
+            echo "✅ 没有发现可以安全清理的历史大文件" >> cleanup-report.md
+          fi
+          
+          echo "" >> cleanup-report.md
+          echo "## 📌 重要提示" >> cleanup-report.md
+          echo "" >> cleanup-report.md
+          
+          if [ "${{ github.event.inputs.force_push }}" = "true" ]; then
+            echo "⚠️  历史已被重写并推送到远程仓库" >> cleanup-report.md
+            echo "" >> cleanup-report.md
+            echo "**所有协作者必须执行以下操作：**" >> cleanup-report.md
+            echo '```bash' >> cleanup-report.md
+            echo "# 备份未提交的更改后，执行：" >> cleanup-report.md
+            echo "git fetch origin" >> cleanup-report.md
+            echo "git reset --hard origin/main  # 或你的主分支名" >> cleanup-report.md
+            echo "git clean -fd" >> cleanup-report.md
+            echo '```' >> cleanup-report.md
+          else
+            echo "💡 历史已在本地清理，但尚未推送到远程" >> cleanup-report.md
+            echo "" >> cleanup-report.md
+            echo "要完成清理，需要手动执行强制推送："
+            echo '```bash' >> cleanup-report.md
+            echo "git push origin --force --all" >> cleanup-report.md
+            echo "git push origin --force --tags" >> cleanup-report.md
+            echo '```' >> cleanup-report.md
+          fi
+          
+          echo "" >> cleanup-report.md
+          echo "---" >> cleanup-report.md
+          echo "*清理操作由 GitHub Actions 执行*" >> cleanup-report.md
+      
+      - name: 上传清理报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-files-cleanup-report
+          path: |
+            cleanup-report.md
+            files-to-delete.txt
+            files-kept.txt
+            all-large-files.txt
+          retention-days: 30
+      
+      - name: 显示最终摘要
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ 清理工作流执行完成"
+          echo "=========================================="
+          echo ""
+          
+          if [ "${{ steps.clean.outputs.cleaned }}" = "true" ]; then
+            echo "🗑️  清理结果："
+            echo "   - 已删除: ${{ steps.clean.outputs.delete_count }} 个历史大文件"
+            echo "   - 保留: ${{ steps.clean.outputs.kept_count }} 个大文件（仍在当前代码中）"
+            echo ""
+            
+            if [ "${{ github.event.inputs.force_push }}" = "true" ]; then
+              echo "🚀 已推送到远程仓库"
+              echo "⚠️  请通知所有协作者重新克隆仓库"
+            else
+              echo "💡 清理已完成但未推送"
+              echo "   如需推送，请重新运行工作流并设置 force_push=true"
+            fi
+          else
+            echo "ℹ️  没有需要清理的历史大文件"
+          fi
+          
+          echo ""
+          echo "📁 完整报告已保存为 Artifact: large-files-cleanup-report"
