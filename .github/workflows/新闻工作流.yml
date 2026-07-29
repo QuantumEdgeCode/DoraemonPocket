@@ -78,7 +78,7 @@ jobs:
   run-crawlers:
     needs: record-start-time
     runs-on: ubuntu-latest
-    timeout-minutes: 30   # 单个爬虫超时保护
+    timeout-minutes: 360  # 单个爬虫 job 超时上限（GitHub 单 job 上限 6h，已拉满；GitHub 仓库设置里没有可改的「Workflow timeout」项，无需改动）
     strategy:
       fail-fast: false    # 单个爬虫失败不影响其他
       max-parallel: 20     # 最多 20 线程并行（GitHub 免费版上限内）
