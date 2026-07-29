@@ -295,9 +295,6 @@ def atomic_save(items, path=OUT_FILE):
 def main():
     parser = argparse.ArgumentParser(description="BBC 双引擎爬虫（学习用途）")
     parser.add_argument(
-        action="store_true",
-    )
-    parser.add_argument(
         "--no-detail",
         action="store_true",
         help="仅抓列表不解析正文（默认会逐篇解析正文）",
