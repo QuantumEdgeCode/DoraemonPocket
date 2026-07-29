@@ -116,10 +116,37 @@ def fetch_sitemap_urls(months=1):
     return out
 
 
-def parse_article(url, aid, verbose=False):
-    html = get_html(url)
-    if not html:
-        return None
+def parse_article(url, aid, verbose=False, max_retry=3):
+    """解析单篇文章。
+
+    当「HTML 已拿到但正文解析为空」时（多为页面动态内容/缓存未就绪，
+    或个别文章结构异常），自动整页重抓 + 重解析，最多 max_retry 次，
+    退避递增；避免偶发失败直接丢掉整篇文章。
+    """
+    for attempt in range(1, max_retry + 1):
+        html = get_html(url)
+        if not html:
+            # 网络层失败：退避后重试整页
+            if attempt < max_retry:
+                if verbose:
+                    print(f"    ↻ 抓取失败，重试 {attempt}/{max_retry}: {url}")
+                time.sleep(1.5 * attempt)
+                continue
+            return None
+        art = _parse_html(html, aid, url)
+        if art:
+            return art
+        # HTML 到位但正文为空 → 可能是动态内容未就绪，重试
+        if attempt < max_retry:
+            if verbose:
+                print(f"    ↻ 解析为空，重试 {attempt}/{max_retry}: {url}")
+            time.sleep(1.5 * attempt)
+            continue
+    return None
+
+
+def _parse_html(html, aid, url):
+    """从已获取的 HTML 解析出文章记录；解析失败（无正文）返回 None。"""
     soup = BeautifulSoup(html, "html.parser")
 
     # 标题
@@ -164,12 +191,16 @@ def parse_article(url, aid, verbose=False):
         return None
     content_parts = []
     images = []
-    for block in body.find_all("div", class_="article__block", recursive=False):
+    for block in body.find_all("div", class_="article__block"):
         dtype = block.get("data-type")
         if dtype == "text":
             txt = block.find("div", class_="article__text")
             if txt:
                 content_parts.append(txt.get_text(strip=True))
+        elif dtype in ("quote", "vrez"):
+            # 改版/短讯：正文常被包进 quote / vrez 块的 <p> 内（而非标准 text 块）
+            for p in block.find_all("p"):
+                content_parts.append(p.get_text(strip=True))
         elif dtype == "article":
             im = block.find("img")
             if im:
@@ -180,6 +211,13 @@ def parse_article(url, aid, verbose=False):
                         "url": src,
                         "caption": cap.get_text(strip=True) if cap else ""
                     })
+    # 兜底：若上述仍无正文，直接从 body 内所有 <p> 提取
+    # （兼容极少数结构异常、段落未包进标准 block 的文章）
+    if not content_parts:
+        for p in body.find_all("p"):
+            t = p.get_text(strip=True)
+            if t:
+                content_parts.append(t)
     content = "\n\n".join(p for p in content_parts if p)
     if not content:
         return None
@@ -232,6 +270,8 @@ def main():
                     help="回溯月数（从最新月份往前），默认 1")
     ap.add_argument("--no-detail", action="store_true")
     ap.add_argument("--playwright", action="store_true")
+    ap.add_argument("--retry", type=int, default=3,
+                    help="单篇解析失败时整页重抓重试次数（默认 3）")
     args = ap.parse_args()
 
     print(f"[*] 抓取 sitemap 索引（最近 {args.months} 个月）…")
@@ -244,10 +284,11 @@ def main():
         for url, aid in items_meta:
             if len(collected) >= args.limit:
                 break
-            art = parse_article(url, aid)
+            art = parse_article(url, aid, verbose=not args.no_detail,
+                                max_retry=args.retry)
             if not art:
                 if not args.no_detail:
-                    print(f"  ! 跳过（无正文/解析失败）：{url}")
+                    print(f"  ! 跳过（重试 {args.retry} 次仍无正文/解析失败）：{url}")
                 continue
             collected.append(art)
             done += 1
