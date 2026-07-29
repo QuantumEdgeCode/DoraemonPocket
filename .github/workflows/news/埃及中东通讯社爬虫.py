@@ -14,11 +14,10 @@ mena_crawler.py — 爬取 https://www.mena.org.eg/ (Middle East News Agency, �
       security verification" 挑战页（403）**；站点**无公开 JSON API**（/api/news/<id>
       只是 Next.js SPA 回退 HTML）。故**全文正文在本沙箱无法取得**。
   - 文章 URL：`https://mena.org.eg/<lang>/news/<slug>`
-        lang ∈ {en, ar, fr}；slug 形如 `trump-denies-reports-...-<uuid>`（末段是文章 id）
+        lang ∈ {en, ar}；slug 形如 `trump-denies-reports-...-<uuid>`（末段是文章 id）
   - 发现来源（按语种抓列表页，取首个能解析出文章的候选 URL）：
         en → /en/mena-news  （回退 /en）
         ar → /ar/news        （回退 / ，即阿拉伯语首页）
-        fr → /fr/mena-news   （回退 /fr）
   - 正文处理：列表内嵌 `bodyNews.body` 是**站点截断的 250 字摘要**（实测恒为 250 字），
         作为 content，并标记 content_source="listing_excerpt_250"（诚实，非全文）。
         如需全文：须在**本机住宅 IP + 真实浏览器（过 Cloudflare）**渲染详情页；
@@ -38,7 +37,7 @@ mena_crawler.py — 爬取 https://www.mena.org.eg/ (Middle East News Agency, �
 研究，禁止商用转发。robots.txt 仅含 Content-Signal 声明，无 sitemap，不阻断。
 
 用法：
-  python mena_crawler.py                  # 默认：en + ar + fr 全量（各 ~80 篇，约 250 条）
+  python mena_crawler.py                  # 默认：en + ar 全量（各 ~80 篇，约 160 条）
   python mena_crawler.py --lang en        # 仅英文
   python mena_crawler.py --lang ar        # 仅阿拉伯文
   python mena_crawler.py --lang en,ar     # 多语种
@@ -72,9 +71,8 @@ HEADERS = {
 LANG_LISTING = {
     "en": ["/en/mena-news", "/en"],
     "ar": ["/ar/news", "/"],
-    "fr": ["/fr/mena-news", "/fr"],
 }
-ALL_LANGS = ["en", "ar", "fr"]
+ALL_LANGS = ["en", "ar"]
 
 CF_MARKERS = ("Performing security verification", "Ray ID",
               "cf-chl", "Just a moment", "Attention Required")
@@ -220,7 +218,7 @@ def atomic_save(articles, path=OUTPUT):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lang", type=str, default="all",
-                    help="语种：en / ar / fr / all / 逗号分隔（默认 all）")
+                    help="语种：en / ar / all / 逗号分隔（默认 all）")
     ap.add_argument("--limit", type=int, default=0,
                     help="每语种最多采集 N 篇（0=全部）")
     ap.add_argument("--delay", type=float, default=2.0,
