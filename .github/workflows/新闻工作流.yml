@@ -356,7 +356,7 @@ jobs:
           SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
           ZIP_NAME="${SUMMARY_DIR}.zip"
           if [ -d "$SUMMARY_DIR" ]; then
-            cd "$SUMMARY_DIR" && zip -0 -r "../${ZIP_NAME}" . && cd ..
+            cd "$SUMMARY_DIR" && zip -9 -r "../${ZIP_NAME}" . && cd ..
             ls -lh "$ZIP_NAME"
           else
             echo "无数据目录，跳过打包"
