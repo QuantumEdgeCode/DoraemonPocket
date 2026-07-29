@@ -154,21 +154,24 @@ jobs:
       - name: 执行 ${{ matrix.file.file }}
         id: run_py
         continue-on-error: true   # 允许失败，结果记入 result.txt，不中断矩阵
-        working-directory: ${{ github.workspace }}   # 仓库根目录（25 个爬虫 .py 所在位置）
+        working-directory: ${{ github.workspace }}   # 仓库根（爬虫脚本在 .github/workflows/news/ 子目录）
         run: |
           NODE_START=$(date -u +%s)
           IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
           echo "执行节点 IP: $IP"
           echo "当前目录: $(pwd)"
-          echo "正在执行: ${{ matrix.file.file }}"
+          # 爬虫脚本存放目录（仓库根下的 .github/workflows/news/）
+          SCRIPTS_DIR=".github/workflows/news"
+          SCRIPT_PATH="$SCRIPTS_DIR/${{ matrix.file.file }}"
+          echo "正在执行: $SCRIPT_PATH"
 
-          # 防御：确认爬虫脚本存在于仓库根，避免路径错位导致含糊失败
-          if [ ! -f "${{ matrix.file.file }}" ]; then
-            echo "错误：找不到爬虫脚本 ${{ matrix.file.file }}（应在仓库根目录）"
+          # 防御：确认爬虫脚本存在于 news 子目录，避免路径错位导致含糊失败
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "错误：找不到爬虫脚本 $SCRIPT_PATH（应在 ${SCRIPTS_DIR}/ 目录）"
             STATUS="MISSING"
           else
             # 执行爬虫；crawl_args 来自手动触发输入（可留空）
-            if python "${{ matrix.file.file }}" ${{ inputs.crawl_args }}; then
+            if python "$SCRIPT_PATH" ${{ inputs.crawl_args }}; then
               STATUS="SUCCESS"
             else
               STATUS="FAILED"
