@@ -256,6 +256,7 @@ jobs:
         run: |
           SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
           mkdir -p "$SUMMARY_DIR/news"
+          mkdir -p "data/新闻"
 
           IP_LIST=""
           IP_TABLE_MD="| 序号 | 英文名 | 中文文件名 | 节点IP | 耗时 | 状态 |\n"
@@ -274,9 +275,10 @@ jobs:
           for artifact_dir in artifacts/crawler-*/; do
             [ -d "$artifact_dir" ] || continue
 
-            # 收集爬虫产出的 json 到汇总目录（若有）
+            # 收集爬虫产出的 json：落到 data/新闻/（即数据处理脚本默认读取的目录）
             if [ -d "${artifact_dir}data/新闻" ]; then
-              cp -r "${artifact_dir}data/新闻/." "$SUMMARY_DIR/news/" 2>/dev/null || true
+              mkdir -p "data/新闻"
+              cp -r "${artifact_dir}data/新闻/." "data/新闻/" 2>/dev/null || true
             fi
 
             if [ -f "${artifact_dir}result.txt" ]; then
@@ -297,13 +299,16 @@ jobs:
               echo "[$cs/25] $ename ($cname) -> $status | ${dur}s | IP:$ip"
 
               IP_TABLE_MD="${IP_TABLE_MD}| $counter | $ename | $cname | $ip | ${dur}s | $status |\n"
-              badge="✅ 成功"; [ "$status" = "FAILED" ] && badge="❌ 失败"
-              IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td>$counter</td><td>$ename</td><td>$cname</td><td class=\"ip-highlight\">$ip</td><td>${dur}s</td><td><span class=\"badge\">$badge</span></td></tr>\n"
+              if [ "$status" = "FAILED" ]; then badge="<span class=\"badge badge-fail\">❌ 失败</span>"; else badge="<span class=\"badge badge-ok\">✅ 成功</span>"; fi
+              IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td class=\"num\">$counter</td><td>$ename</td><td class=\"cname\">$cname</td><td class=\"ip-highlight\">$ip</td><td class=\"dur\">${dur}s</td><td>$badge</td></tr>\n"
 
               if [ -n "$IP_LIST" ]; then IP_LIST="${IP_LIST}, ${ip}"; else IP_LIST="${ip}"; fi
               counter=$((counter + 1))
             fi
           done
+
+          # 同步一份到 SUMMARY_DIR/news 供后续打包与 SHA256 校验使用
+          cp -r "data/新闻/." "$SUMMARY_DIR/news/" 2>/dev/null || true
 
           rm -rf artifacts
 
@@ -331,6 +336,30 @@ jobs:
           fi
 
       # ----------------------------------------------------------
+      # 运行新闻数据处理脚本：对爬取完成的原始 JSON 做去重/分类，
+      # 生成「简报版」+「完整版」两份 Markdown 日报。
+      # 脚本默认读取 ./data/新闻/*.json（即上面已汇总到 data/新闻 的数据），
+      # 输出 news_daily_{date}.md（简报）与 news_daily_{date}_full.md（完整版）到 $SUMMARY_DIR。
+      # ----------------------------------------------------------
+      - name: 设置 Python（数据处理用）
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 运行新闻数据处理脚本生成日报
+        run: |
+          SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
+          DATE="${{ steps.date.outputs.date }}"
+          # 数据已在 data/新闻/ 汇总；若为空则给出提示但继续执行（不阻断后续打包/发布）
+          if [ ! -d "data/新闻" ] || [ -z "$(ls -A data/新闻 2>/dev/null)" ]; then
+            echo "警告：data/新闻 目录为空，跳过日报生成"
+          else
+            python3 .github/workflows/news/新闻数据处理.py --input data/新闻 --output "$SUMMARY_DIR" --date "$DATE"
+            echo "=== 生成的日报文件 ==="
+            ls -lh "$SUMMARY_DIR"/news_daily_*.md 2>/dev/null || echo "未生成日报"
+          fi
+
+      # ----------------------------------------------------------
       # 计算所有产出 json 的 SHA256（若有）
       # ----------------------------------------------------------
       - name: 计算 SHA256 校验值
@@ -354,7 +383,7 @@ jobs:
       - name: 打包汇总数据
         run: |
           SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
-          ZIP_NAME="${SUMMARY_DIR}.zip"
+          ZIP_NAME="新闻数据${SUMMARY_DIR}.zip"
           if [ -d "$SUMMARY_DIR" ]; then
             cd "$SUMMARY_DIR" && zip -9 -r "../${ZIP_NAME}" . && cd ..
             ls -lh "$ZIP_NAME"
@@ -438,8 +467,10 @@ jobs:
           name: 新闻爬虫数据 - ${{ steps.date.outputs.date }} (${{ steps.date.outputs.slot == 'am' && '上午' || '晚上' }})
           body_path: release_body.md
           files: |
-            ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}.zip
+            新闻数据${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}.zip
             ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}/SHA256SUMS.txt
+            ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}/news_daily_${{ steps.date.outputs.date }}.md
+            ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}/news_daily_${{ steps.date.outputs.date }}_full.md
           draft: false
           prerelease: false
         env:
@@ -463,40 +494,69 @@ jobs:
             <!DOCTYPE html>
             <html>
             <head>
+            <meta charset="utf-8">
             <style>
-              body { font-family: 'Microsoft YaHei', Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
-              .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-              .header { background: linear-gradient(135deg, #2193b0 0%, #6dd5ed 100%); color: white; padding: 30px; border-radius: 10px 10px 0 0; text-align: center; }
-              .content { padding: 30px; }
-              .section { margin-bottom: 30px; }
-              .section h2 { color: #333; border-bottom: 2px solid #2193b0; padding-bottom: 10px; }
-              .info-table { width: 100%; border-collapse: collapse; }
-              .info-table td { padding: 8px 12px; border-bottom: 1px solid #eee; }
-              .info-table td:first-child { font-weight: bold; color: #666; width: 160px; }
-              .ip-table { width: 100%; border-collapse: collapse; background: #f8f9fa; border-radius: 5px; }
-              .ip-table th { background: #2193b0; color: white; padding: 10px; text-align: left; }
-              .ip-table td { padding: 8px 10px; border-bottom: 1px solid #e0e0e0; font-size: 13px; }
-              .ip-highlight { color: #2193b0; font-weight: bold; font-family: monospace; }
-              .badge { padding: 3px 8px; border-radius: 3px; font-size: 12px; color: white; }
-              .stats { display: flex; justify-content: space-around; margin: 20px 0; flex-wrap: wrap; }
-              .stat-item { text-align: center; padding: 15px; background: #f8f9fa; border-radius: 5px; flex: 1; margin: 5px; min-width: 100px; }
-              .stat-value { font-size: 28px; font-weight: bold; color: #2193b0; }
-              .stat-label { font-size: 12px; color: #666; margin-top: 5px; }
-              .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; border-top: 1px solid #eee; }
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { font-family: 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', Arial, sans-serif; background: #eef2f7; margin: 0; padding: 32px 16px; -webkit-font-smoothing: antialiased; }
+              .container { max-width: 920px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 8px 30px rgba(15, 23, 42, 0.10); }
+              .accent-bar { height: 6px; background: #6366f1; background: linear-gradient(90deg, #6366f1 0%, #8b5cf6 50%, #06b6d4 100%); }
+              .header { background: #4f46e5; background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: #ffffff; padding: 38px 36px 32px; }
+              .header .eyebrow { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; opacity: 0.85; font-weight: 600; }
+              .header h1 { font-size: 29px; font-weight: 700; margin: 10px 0 10px; letter-spacing: 0.5px; }
+              .header p { font-size: 14px; opacity: 0.92; }
+              .header .date-pill { display: inline-block; margin-top: 18px; background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.35); padding: 6px 18px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+              .content { padding: 30px 36px 6px; }
+              .stats { display: flex; flex-wrap: wrap; margin: 2px -7px 28px; }
+              .stat-item { flex: 1; min-width: 130px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px 14px 16px; text-align: center; position: relative; margin: 7px; }
+              .stat-item::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; border-radius: 12px 12px 0 0; background: #6366f1; }
+              .stat-item.ok::before { background: #10b981; }
+              .stat-item.fail::before { background: #ef4444; }
+              .stat-item.time::before { background: #f59e0b; }
+              .stat-value { font-size: 30px; font-weight: 800; color: #1e293b; line-height: 1.1; }
+              .stat-item.ok .stat-value { color: #059669; }
+              .stat-item.fail .stat-value { color: #dc2626; }
+              .stat-label { font-size: 12px; color: #64748b; margin-top: 9px; font-weight: 600; letter-spacing: 1px; }
+              .section { margin-bottom: 32px; }
+              .section h2 { font-size: 18px; color: #1e293b; margin-bottom: 16px; padding-left: 12px; border-left: 4px solid #6366f1; font-weight: 700; }
+              .info-table { width: 100%; border-collapse: collapse; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
+              .info-table td { padding: 12px 16px; border-bottom: 1px solid #eef2f7; font-size: 14px; color: #334155; }
+              .info-table tr:nth-child(even) { background: #f8fafc; }
+              .info-table tr:last-child td { border-bottom: none; }
+              .info-table td:first-child { font-weight: 600; color: #475569; width: 150px; background: #f1f5f9; }
+              .ip-table { width: 100%; border-collapse: collapse; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; font-size: 13px; }
+              .ip-table th { background: #1e293b; color: #ffffff; padding: 12px 14px; text-align: left; font-weight: 600; font-size: 12px; letter-spacing: 0.5px; }
+              .ip-table td { padding: 11px 14px; border-bottom: 1px solid #eef2f7; color: #334155; }
+              .ip-table tr:nth-child(even) td { background: #f8fafc; }
+              .ip-table tr:last-child td { border-bottom: none; }
+              .ip-table td.num { color: #94a3b8; font-weight: 600; width: 46px; }
+              .ip-table td.cname { font-weight: 600; color: #1e293b; }
+              .ip-table td.dur { color: #475569; }
+              .ip-highlight { color: #4f46e5; font-weight: 700; font-family: 'Consolas', 'Monaco', monospace; font-size: 12px; }
+              .badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+              .badge-ok { background: #d1fae5; color: #047857; }
+              .badge-fail { background: #fee2e2; color: #b91c1c; }
+              .release-box { background: #eef2ff; background: linear-gradient(135deg, #eef2ff 0%, #faf5ff 100%); border: 1px solid #e0e7ff; border-radius: 12px; padding: 22px 24px; }
+              .release-btn { display: inline-block; background: #4f46e5; background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: #ffffff !important; text-decoration: none; padding: 12px 28px; border-radius: 10px; font-weight: 700; font-size: 14px; box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35); }
+              .release-url { display: block; margin-top: 14px; font-size: 12px; color: #64748b; word-break: break-all; font-family: 'Consolas', monospace; }
+              .footer { text-align: center; padding: 24px 20px 30px; color: #94a3b8; font-size: 12px; border-top: 1px solid #eef2f7; margin-top: 6px; line-height: 1.7; }
+              .footer .brand { font-weight: 700; color: #64748b; letter-spacing: 1px; font-size: 13px; }
             </style>
             </head>
             <body>
             <div class="container">
+            <div class="accent-bar"></div>
             <div class="header">
+              <div class="eyebrow">GitHub Actions · 自动化报告</div>
               <h1>🕷️ 新闻爬虫批量执行完成</h1>
-              <p>多IP并行执行模式 | 最多 20 runner 并发 / 25 爬虫排队</p>
+              <p>多 IP 并行执行模式 ｜ 最多 20 runner 并发 · 25 爬虫排队</p>
+              <span class="date-pill">📅 ${{ steps.date.outputs.date }}</span>
             </div>
             <div class="content">
               <div class="stats">
                 <div class="stat-item"><div class="stat-value">${{ steps.collect.outputs.total }}</div><div class="stat-label">爬虫总数</div></div>
-                <div class="stat-item"><div class="stat-value" style="color:#4caf50">${{ steps.collect.outputs.success }}</div><div class="stat-label">成功</div></div>
-                <div class="stat-item"><div class="stat-value" style="color:#f44336">${{ steps.collect.outputs.failed }}</div><div class="stat-label">失败</div></div>
-                <div class="stat-item"><div class="stat-value">${{ steps.run_time.outputs.duration }}</div><div class="stat-label">总耗时</div></div>
+                <div class="stat-item ok"><div class="stat-value">${{ steps.collect.outputs.success }}</div><div class="stat-label">成功</div></div>
+                <div class="stat-item fail"><div class="stat-value">${{ steps.collect.outputs.failed }}</div><div class="stat-label">失败</div></div>
+                <div class="stat-item time"><div class="stat-value" style="font-size:20px">${{ steps.run_time.outputs.duration }}</div><div class="stat-label">总耗时</div></div>
               </div>
               <div class="section">
                 <h2>⏱️ 执行信息</h2>
@@ -514,19 +574,21 @@ jobs:
               <div class="section">
                 <h2>🌐 执行节点详情（25 个）</h2>
                 <table class="ip-table">
-                  <tr><th>序号</th><th>英文名</th><th>中文文件名</th><th>节点IP</th><th>耗时</th><th>状态</th></tr>
+                  <tr><th>#</th><th>英文名</th><th>中文文件名</th><th>节点IP</th><th>耗时</th><th>状态</th></tr>
                   ${{ steps.collect.outputs.ip_table_html }}
                 </table>
               </div>
               <div class="section">
-                <h2>🔗 Release 链接</h2>
-                <a href="https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}" style="color:#2193b0;font-weight:bold;">
-                  📦 https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}
-                </a>
+                <h2>🔗 Release 数据发布</h2>
+                <div class="release-box">
+                  <a class="release-btn" href="https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}">📦 查看 / 下载本次数据</a>
+                  <span class="release-url">https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}</span>
+                </div>
               </div>
             </div>
             <div class="footer">
-              <p>由 GitHub Actions 自动生成 | 多IP并行执行模式</p>
+              <p class="brand">🕷️ 新闻爬虫自动化系统</p>
+              <p>由 GitHub Actions 自动生成 · 多 IP 并行执行模式</p>
               <p>数据来源：25 个新闻机构爬虫</p>
             </div>
             </div>
