@@ -1,0 +1,560 @@
+# ============================================================
+# 工作流名称：新闻爬虫批量执行（多IP并行版）
+# 功能描述：定时或手动触发，最多 20 个 runner 并发，执行 25 个 Python 爬虫
+#          矩阵策略实现并行执行，25 个任务排队（前 20 并发、剩余 5 补充）
+#          每个爬虫独立 runner：记录节点 IP、耗时、成功/失败
+#          全部完成后汇总统计、打包数据、计算 SHA256、创建 Release
+#          通过邮件和 Telegram 发送通知（含全部节点 IP 与耗时）
+# 文件路径：.github/workflows/run-crawlers.yml
+# 魔改自：download-tdx-data.yml（通达信多IP并行下载工作流）
+# 更新时间：2026-07-29
+# ============================================================
+
+name: 新闻爬虫批量执行（多IP并行）
+
+# ============================================================
+# 触发条件配置
+# ============================================================
+on:
+  schedule:
+    # 定时触发：每天两次（北京时间 09:00 与 23:00）
+    # 北京时间 = UTC+8 → 09:00 = UTC 01:00，23:00 = UTC 15:00
+    - cron: '0 1 * * *'
+    - cron: '0 15 * * *'
+  # 手动触发：允许在 GitHub 页面手动运行，并可传入参数
+  workflow_dispatch:
+    inputs:
+      install_playwright:
+        description: '是否安装 Playwright 浏览器（部分爬虫降级渲染需要）'
+        type: boolean
+        default: false
+      make_release:
+        description: '是否把所有爬虫产出打包上传为 GitHub Release'
+        type: boolean
+        default: true
+      crawl_args:
+        description: '传给每个爬虫的额外命令行参数（如 --no-detail）'
+        type: string
+        default: ''
+
+# ============================================================
+# 权限配置
+# ============================================================
+permissions:
+  contents: write  # 允许创建/更新 Release
+  actions: read    # 允许读取工作流运行信息
+
+# 防止重叠运行：同一分支同时只跑一个实例，新触发排队而非取消
+concurrency:
+  group: news-crawlers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ============================================================
+  # 作业0：记录工作流开始时间（所有 job 之前执行）
+  # ============================================================
+  record-start-time:
+    runs-on: ubuntu-latest
+    outputs:
+      workflow_start: ${{ steps.set_start.outputs.workflow_start }}
+      workflow_start_time: ${{ steps.set_start.outputs.workflow_start_time }}
+    steps:
+      - name: 记录工作流开始时间
+        id: set_start
+        run: |
+          WORKFLOW_START=$(date -u +%s)
+          WORKFLOW_START_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
+          echo "工作流开始时间戳: $WORKFLOW_START"
+          echo "工作流开始时间: $WORKFLOW_START_TIME (北京时间)"
+          echo "workflow_start=${WORKFLOW_START}" >> $GITHUB_OUTPUT
+          echo "workflow_start_time=${WORKFLOW_START_TIME}" >> $GITHUB_OUTPUT
+
+  # ============================================================
+  # 作业1：多 runner 并行执行 25 个爬虫（矩阵策略）
+  # 说明：max-parallel: 20 配合 25 个矩阵项，GitHub 会先并发 20 个，
+  #       剩余 5 个排队等待；前 20 每完成一个即补位一个，
+  #       最终表现为「第一批 20 + 第二批 5」的并行队列。
+  # ============================================================
+  run-crawlers:
+    needs: record-start-time
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # 单个爬虫超时保护
+    strategy:
+      fail-fast: false    # 单个爬虫失败不影响其他
+      max-parallel: 20     # 最多 20 线程并行（GitHub 免费版上限内）
+      matrix:
+        # 每个爬虫：name=英文短标识（用于 artifact/日志），file=真实中文文件名
+        file:
+          - { name: cna,        file: 中央通讯社爬虫.py }
+          - { name: bbc,        file: 英国广播公司爬虫.py }
+          - { name: aa,         file: 阿纳多卢通讯社爬虫.py }
+          - { name: mena,       file: 埃及中东通讯社爬虫.py }
+          - { name: belta,      file: 白俄罗斯通讯社爬虫.py }
+          - { name: aljazeera,  file: 半岛电视台爬虫.py }
+          - { name: asahi,      file: 朝日新闻爬虫.py }
+          - { name: donga,      file: 东亚日报爬虫.py }
+          - { name: rg,         file: 俄罗斯报爬虫.py }
+          - { name: ng,         file: 俄罗斯独立报爬虫.py }
+          - { name: sputnik,    file: 俄罗斯卫星通讯社爬虫.py }
+          - { name: ria,        file: 俄新社爬虫.py }
+          - { name: gnews,      file: 谷歌新闻爬虫.py }
+          - { name: straitstimes, file: 海峡时报爬虫.py }
+          - { name: yna,        file: 韩联社爬虫.py }
+          - { name: bernama,    file: 马来西亚国家通讯社爬虫.py }
+          - { name: mk,         file: 每日经济新闻爬虫.py }
+          - { name: scmp,       file: 南华早报爬虫.py }
+          - { name: bloomberg,  file: 彭博社爬虫.py }
+          - { name: tass,       file: 塔斯社爬虫.py }
+          - { name: ukrinform,  file: 乌克兰国家通讯社爬虫.py }
+          - { name: irna_fa,    file: 伊朗通讯社波斯语爬虫.py }
+          - { name: irna_zh,    file: 伊朗通讯社中文网爬虫.py }
+          - { name: thehindu,   file: 印度教徒报爬虫.py }
+          - { name: nikkei,     file: 日本经济新闻爬虫.py }
+
+    steps:
+      # ----------------------------------------------------------
+      # 步骤1：检出仓库（拿到 .py 爬虫与 data/ 目录）
+      # ----------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # 步骤2：配置 Python 环境
+      # ----------------------------------------------------------
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ----------------------------------------------------------
+      # 步骤3：安装依赖（优先 requirements.txt，否则装基础包）
+      # ----------------------------------------------------------
+      - name: 安装基础依赖
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests beautifulsoup4 lxml
+          fi
+
+      # ----------------------------------------------------------
+      # 步骤4：（可选）安装 Playwright 浏览器
+      # 仅在手动触发且勾选 install_playwright 时执行（耗时较大）
+      # ----------------------------------------------------------
+      - name: 安装 Playwright 浏览器
+        if: ${{ inputs.install_playwright == true }}
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      # ----------------------------------------------------------
+      # 步骤5：执行爬虫并记录节点 IP / 耗时 / 状态
+      # ----------------------------------------------------------
+      - name: 执行 ${{ matrix.file.file }}
+        id: run_py
+        continue-on-error: true   # 允许失败，结果记入 result.txt，不中断矩阵
+        working-directory: ${{ github.workspace }}   # 仓库根目录（25 个爬虫 .py 所在位置）
+        run: |
+          NODE_START=$(date -u +%s)
+          IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
+          echo "执行节点 IP: $IP"
+          echo "当前目录: $(pwd)"
+          echo "正在执行: ${{ matrix.file.file }}"
+
+          # 防御：确认爬虫脚本存在于仓库根，避免路径错位导致含糊失败
+          if [ ! -f "${{ matrix.file.file }}" ]; then
+            echo "错误：找不到爬虫脚本 ${{ matrix.file.file }}（应在仓库根目录）"
+            STATUS="MISSING"
+          else
+            # 执行爬虫；crawl_args 来自手动触发输入（可留空）
+            if python "${{ matrix.file.file }}" ${{ inputs.crawl_args }}; then
+              STATUS="SUCCESS"
+            else
+              STATUS="FAILED"
+            fi
+          fi
+
+          NODE_END=$(date -u +%s)
+          NODE_DURATION=$((NODE_END - NODE_START))
+          echo "执行结束 - 状态: $STATUS - 节点耗时: ${NODE_DURATION}秒 - IP: ${IP}"
+
+          # 结果格式：英文名|中文文件名|状态|耗时(秒)|节点IP
+          echo "${{ matrix.file.name }}|${{ matrix.file.file }}|${STATUS}|${NODE_DURATION}|${IP}" > result.txt
+
+      # ----------------------------------------------------------
+      # 步骤6：收集产出并上传 Artifact（结果 + 日志 + 爬虫产出 json）
+      # 即使爬虫失败（step5 标记 continue-on-error）也上传，供汇总
+      # ----------------------------------------------------------
+      - name: 上传结果到 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawler-${{ matrix.file.name }}
+          path: |
+            result.txt
+            data/新闻/**/*.json
+          retention-days: 7
+          if-no-files-found: ignore   # 爬虫失败时可能没有 json，忽略
+
+  # ============================================================
+  # 作业2：汇总统计、打包、Release、通知
+  # 等待所有爬虫（含失败）完成后执行；always() 确保即使有失败也汇总
+  # ============================================================
+  collect-and-release:
+    needs: [record-start-time, run-crawlers]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
+      MAIL_PORT: ${{ secrets.MAIL_PORT }}
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+    steps:
+      - name: 获取工作流开始时间
+        id: start_time
+        run: |
+          echo "工作流开始时间戳: ${{ needs.record-start-time.outputs.workflow_start }}"
+          echo "工作流开始时间: ${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间)"
+
+      - name: 获取当前日期与时段标识
+        id: date
+        run: |
+          # 日期（YYYY-MM-DD）
+          echo "date=$(TZ='Asia/Shanghai' date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          # 完整时间
+          echo "datetime=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+          # 时段标识：北京时间 00:00–11:59 → am，12:00–23:59 → pm
+          # 用于每天两次跑时区分 Release tag / 目录 / 打包名，避免同一天撞名
+          HR=$(TZ='Asia/Shanghai' date +%H)
+          if [ "$HR" -lt 12 ]; then SLOT="am"; else SLOT="pm"; fi
+          echo "slot=${SLOT}" >> $GITHUB_OUTPUT
+          echo "时段标识(am=上午/pm=晚上): ${SLOT}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 下载所有分片 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: crawler-*
+
+      # ----------------------------------------------------------
+      # 汇总：收集每个爬虫的 result.txt（状态/耗时/IP），统计成败
+      # ----------------------------------------------------------
+      - name: 收集执行结果并汇总
+        id: collect
+        run: |
+          SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
+          mkdir -p "$SUMMARY_DIR/news"
+
+          IP_LIST=""
+          IP_TABLE_MD="| 序号 | 英文名 | 中文文件名 | 节点IP | 耗时 | 状态 |\n"
+          IP_TABLE_MD="${IP_TABLE_MD}|------|--------|----------|------------|------|------|\n"
+          IP_TABLE_HTML=""
+          total_duration_all=0
+          max_duration=0
+          success=0
+          failed=0
+          counter=1
+
+          echo "============================================================"
+          echo "  新闻爬虫批量执行 - 汇总"
+          echo "============================================================"
+
+          for artifact_dir in artifacts/crawler-*/; do
+            [ -d "$artifact_dir" ] || continue
+
+            # 收集爬虫产出的 json 到汇总目录（若有）
+            if [ -d "${artifact_dir}data/新闻" ]; then
+              cp -r "${artifact_dir}data/新闻/." "$SUMMARY_DIR/news/" 2>/dev/null || true
+            fi
+
+            if [ -f "${artifact_dir}result.txt" ]; then
+              IFS='|' read -r ename cname status dur ip < "${artifact_dir}result.txt"
+
+              # 统计
+              if [ "$status" = "SUCCESS" ]; then
+                success=$((success + 1))
+              else
+                failed=$((failed + 1))
+              fi
+              total_duration_all=$((total_duration_all + dur))
+              if [ "$dur" -gt "$max_duration" ]; then
+                max_duration=$dur
+              fi
+
+              cs=$(printf "%2d" $counter)
+              echo "[$cs/25] $ename ($cname) -> $status | ${dur}s | IP:$ip"
+
+              IP_TABLE_MD="${IP_TABLE_MD}| $counter | $ename | $cname | $ip | ${dur}s | $status |\n"
+              badge="✅ 成功"; [ "$status" = "FAILED" ] && badge="❌ 失败"
+              IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td>$counter</td><td>$ename</td><td>$cname</td><td class=\"ip-highlight\">$ip</td><td>${dur}s</td><td><span class=\"badge\">$badge</span></td></tr>\n"
+
+              if [ -n "$IP_LIST" ]; then IP_LIST="${IP_LIST}, ${ip}"; else IP_LIST="${ip}"; fi
+              counter=$((counter + 1))
+            fi
+          done
+
+          rm -rf artifacts
+
+          echo "------------------------------------------------------------"
+          echo "  成功: $success | 失败: $failed | 总爬虫数: $((success + failed))"
+          echo "  所有节点耗时总和(串行参考): ${total_duration_all}s"
+          echo "  最长单任务耗时(并行参考): ${max_duration}s"
+          echo "  所有节点 IP: $IP_LIST"
+          echo "------------------------------------------------------------"
+
+          echo "$IP_LIST" > ip_list.txt
+          echo -e "$IP_TABLE_MD" > ip_table_md.txt
+          echo -e "$IP_TABLE_HTML" > ip_table_html.txt
+
+          echo "ip_list=${IP_LIST}" >> $GITHUB_OUTPUT
+          echo "success=${success}" >> $GITHUB_OUTPUT
+          echo "failed=${failed}" >> $GITHUB_OUTPUT
+          echo "total=$((success + failed))" >> $GITHUB_OUTPUT
+          echo "total_duration_all=${total_duration_all}" >> $GITHUB_OUTPUT
+          echo "max_duration=${max_duration}" >> $GITHUB_OUTPUT
+
+          if [ "$((success + failed))" -eq 0 ]; then
+            echo "错误：没有任何爬虫结果！"
+            exit 1
+          fi
+
+      # ----------------------------------------------------------
+      # 计算所有产出 json 的 SHA256（若有）
+      # ----------------------------------------------------------
+      - name: 计算 SHA256 校验值
+        run: |
+          SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
+          cd "$SUMMARY_DIR" 2>/dev/null || { echo "无汇总目录，跳过"; exit 0; }
+          {
+            echo "# SHA256 校验值"
+            echo "# 生成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间"
+            echo ""
+            find news -name '*.json' | while read f; do
+              sha=$(sha256sum "$f" | awk '{print $1}')
+              echo "$sha  $f"
+            done
+          } > SHA256SUMS.txt 2>/dev/null || true
+          echo "校验文件已生成（若存在 json）"
+
+      # ----------------------------------------------------------
+      # 打包汇总数据（所有爬虫 json + 校验文件）
+      # ----------------------------------------------------------
+      - name: 打包汇总数据
+        run: |
+          SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
+          ZIP_NAME="${SUMMARY_DIR}.zip"
+          if [ -d "$SUMMARY_DIR" ]; then
+            cd "$SUMMARY_DIR" && zip -0 -r "../${ZIP_NAME}" . && cd ..
+            ls -lh "$ZIP_NAME"
+          else
+            echo "无数据目录，跳过打包"
+            touch "$ZIP_NAME"   # 占位，避免 Release 步骤报错
+          fi
+
+      # ----------------------------------------------------------
+      # 计算工作流总运行时间
+      # ----------------------------------------------------------
+      - name: 计算工作流总运行时间
+        id: run_time
+        run: |
+          end=$(date -u +%s)
+          start=${{ needs.record-start-time.outputs.workflow_start }}
+          total_duration=$((end - start))
+          total_minutes=$((total_duration / 60))
+          total_seconds=$((total_duration % 60))
+          end_time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
+
+          echo "============================================================"
+          echo "  工作流运行时间统计"
+          echo "  开始: ${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间)"
+          echo "  结束: ${end_time} (北京时间)"
+          echo "  总运行: ${total_minutes}分${total_seconds}秒"
+          echo "  最长单任务耗时(并行参考): ${{ steps.collect.outputs.max_duration }}s"
+          echo "============================================================"
+
+          echo "end_time=${end_time}" >> $GITHUB_OUTPUT
+          echo "duration=${total_minutes}分${total_seconds}秒" >> $GITHUB_OUTPUT
+          echo "duration_seconds=${total_duration}" >> $GITHUB_OUTPUT
+
+      - name: 获取汇总服务器 IP
+        run: |
+          MERGE_IP=$(curl -s https://api64.ipify.org?format=json | jq -r '.ip')
+          echo "MERGE_IP=${MERGE_IP}" >> $GITHUB_ENV
+
+      # ----------------------------------------------------------
+      # 构建 Release 说明
+      # ----------------------------------------------------------
+      - name: 构建 Release Body
+        id: build_body
+        run: |
+          IP_TABLE_MD=$(cat ip_table_md.txt)
+          cat > release_body.md << RELEASE_EOF
+          ## 🕷️ 新闻爬虫批量执行（多IP并行）
+
+          ### ⏱️ 执行信息
+          | 项目 | 内容 |
+          |------|------|
+          | **执行日期** | ${{ steps.date.outputs.date }} |
+          | **开始时间** | ${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间) |
+          | **结束时间** | ${{ steps.run_time.outputs.end_time }} (北京时间) |
+          | **总运行耗时** | ${{ steps.run_time.outputs.duration }} |
+          | **并行模式** | 🌐 最多 20 runner 并发（25 爬虫排队） |
+          | **汇总IP** | ${{ env.MERGE_IP }} |
+          | **成功 / 失败** | ${{ steps.collect.outputs.success }} / ${{ steps.collect.outputs.failed }} |
+          | **最长单任务耗时** | ${{ steps.collect.outputs.max_duration }}秒 |
+
+          > 📊 25 个爬虫在最多 20 并发下排队执行：前 20 先跑，剩余 5 个补位。
+
+          ### 🌐 执行节点 IP 与状态（25 个）
+          ${IP_TABLE_MD}
+
+          ### 🔐 校验文件
+          - SHA256SUMS.txt - 包含所有产出 JSON 的 SHA256 校验值
+
+          ---
+          *由 GitHub Actions 自动生成 | 多IP并行执行模式 | 25 爬虫*
+          RELEASE_EOF
+
+      # ----------------------------------------------------------
+      # 创建 GitHub Release（可关闭）
+      # ----------------------------------------------------------
+      - name: 创建 Release
+        if: ${{ inputs.make_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}
+          name: 新闻爬虫数据 - ${{ steps.date.outputs.date }} (${{ steps.date.outputs.slot == 'am' && '上午' || '晚上' }})
+          body_path: release_body.md
+          files: |
+            ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}.zip
+            ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}/SHA256SUMS.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ----------------------------------------------------------
+      # 发送邮件通知（HTML，含全部节点 IP 与耗时）
+      # ----------------------------------------------------------
+      - name: 发送邮件通知
+        if: env.MAIL_ADDRESS && env.MAIL_USERNAME && env.MAIL_PASSWORD
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ env.MAIL_ADDRESS }}
+          server_port: ${{ env.MAIL_PORT }}
+          username: ${{ env.MAIL_USERNAME }}
+          password: ${{ env.MAIL_PASSWORD }}
+          subject: 🕷️ 新闻爬虫执行完成 - ${{ steps.date.outputs.date }} (耗时${{ steps.run_time.outputs.duration }} / 成功${{ steps.collect.outputs.success }} 失败${{ steps.collect.outputs.failed }})
+          to: ${{ env.MAIL_TO }}
+          from: 新闻爬虫自动执行
+          html_body: |
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <style>
+              body { font-family: 'Microsoft YaHei', Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+              .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+              .header { background: linear-gradient(135deg, #2193b0 0%, #6dd5ed 100%); color: white; padding: 30px; border-radius: 10px 10px 0 0; text-align: center; }
+              .content { padding: 30px; }
+              .section { margin-bottom: 30px; }
+              .section h2 { color: #333; border-bottom: 2px solid #2193b0; padding-bottom: 10px; }
+              .info-table { width: 100%; border-collapse: collapse; }
+              .info-table td { padding: 8px 12px; border-bottom: 1px solid #eee; }
+              .info-table td:first-child { font-weight: bold; color: #666; width: 160px; }
+              .ip-table { width: 100%; border-collapse: collapse; background: #f8f9fa; border-radius: 5px; }
+              .ip-table th { background: #2193b0; color: white; padding: 10px; text-align: left; }
+              .ip-table td { padding: 8px 10px; border-bottom: 1px solid #e0e0e0; font-size: 13px; }
+              .ip-highlight { color: #2193b0; font-weight: bold; font-family: monospace; }
+              .badge { padding: 3px 8px; border-radius: 3px; font-size: 12px; color: white; }
+              .stats { display: flex; justify-content: space-around; margin: 20px 0; flex-wrap: wrap; }
+              .stat-item { text-align: center; padding: 15px; background: #f8f9fa; border-radius: 5px; flex: 1; margin: 5px; min-width: 100px; }
+              .stat-value { font-size: 28px; font-weight: bold; color: #2193b0; }
+              .stat-label { font-size: 12px; color: #666; margin-top: 5px; }
+              .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; border-top: 1px solid #eee; }
+            </style>
+            </head>
+            <body>
+            <div class="container">
+            <div class="header">
+              <h1>🕷️ 新闻爬虫批量执行完成</h1>
+              <p>多IP并行执行模式 | 最多 20 runner 并发 / 25 爬虫排队</p>
+            </div>
+            <div class="content">
+              <div class="stats">
+                <div class="stat-item"><div class="stat-value">${{ steps.collect.outputs.total }}</div><div class="stat-label">爬虫总数</div></div>
+                <div class="stat-item"><div class="stat-value" style="color:#4caf50">${{ steps.collect.outputs.success }}</div><div class="stat-label">成功</div></div>
+                <div class="stat-item"><div class="stat-value" style="color:#f44336">${{ steps.collect.outputs.failed }}</div><div class="stat-label">失败</div></div>
+                <div class="stat-item"><div class="stat-value">${{ steps.run_time.outputs.duration }}</div><div class="stat-label">总耗时</div></div>
+              </div>
+              <div class="section">
+                <h2>⏱️ 执行信息</h2>
+                <table class="info-table">
+                  <tr><td>执行日期</td><td>${{ steps.date.outputs.date }}</td></tr>
+                  <tr><td>开始时间</td><td>${{ needs.record-start-time.outputs.workflow_start_time }} (北京时间)</td></tr>
+                  <tr><td>结束时间</td><td>${{ steps.run_time.outputs.end_time }} (北京时间)</td></tr>
+                  <tr><td>总运行耗时</td><td><strong>${{ steps.run_time.outputs.duration }}</strong></td></tr>
+                  <tr><td>并行模式</td><td>🌐 最多 20 runner 并发（25 爬虫排队）</td></tr>
+                  <tr><td>汇总服务器IP</td><td class="ip-highlight">${{ env.MERGE_IP }}</td></tr>
+                  <tr><td>所有节点IP</td><td class="ip-highlight">${{ steps.collect.outputs.ip_list }}</td></tr>
+                  <tr><td>最长单任务耗时</td><td>${{ steps.collect.outputs.max_duration }}秒</td></tr>
+                </table>
+              </div>
+              <div class="section">
+                <h2>🌐 执行节点详情（25 个）</h2>
+                <table class="ip-table">
+                  <tr><th>序号</th><th>英文名</th><th>中文文件名</th><th>节点IP</th><th>耗时</th><th>状态</th></tr>
+                  ${{ steps.collect.outputs.ip_table_html }}
+                </table>
+              </div>
+              <div class="section">
+                <h2>🔗 Release 链接</h2>
+                <a href="https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}" style="color:#2193b0;font-weight:bold;">
+                  📦 https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}
+                </a>
+              </div>
+            </div>
+            <div class="footer">
+              <p>由 GitHub Actions 自动生成 | 多IP并行执行模式</p>
+              <p>数据来源：25 个新闻机构爬虫</p>
+            </div>
+            </div>
+            </body>
+            </html>
+
+      # ----------------------------------------------------------
+      # 发送 Telegram 通知（摘要 + IP 列表）
+      # 安全：丢弃 API 响应，仅输出 HTTP 状态码
+      # ----------------------------------------------------------
+      - name: 发送 Telegram 通知
+        if: env.TG_BOT_TOKEN && env.TG_CHAT_ID
+        run: |
+          MESSAGE="🕷️ 新闻爬虫批量执行完成
+
+          日期: ${{ steps.date.outputs.date }}
+          总耗时: ${{ steps.run_time.outputs.duration }}
+          成功/失败: ${{ steps.collect.outputs.success }} / ${{ steps.collect.outputs.failed }}
+          最长单任务耗时: ${{ steps.collect.outputs.max_duration }}秒
+
+          执行节点IP:
+          ${{ steps.collect.outputs.ip_list }}
+
+          🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}"
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT_ID}" \
+            -d text="$MESSAGE")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Telegram 通知发送成功 (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ Telegram 通知发送失败 (HTTP $HTTP_CODE)"
+          fi
