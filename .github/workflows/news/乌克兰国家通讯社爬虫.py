@@ -85,6 +85,10 @@ READ_ALSO_RE = re.compile(r"\s*read also[:\s]", re.IGNORECASE)
 SSL_RETRIES = 5
 BACKOFF = 2.0
 
+# 熔断（circuit-breaker）：防止爬虫进入「持续获取失败」死循环 = 无效执行
+CONSECUTIVE_FAIL_LIMIT = 20   # 连续 20 条获取失败（正文为空/被跳过/解析异常）→ 强制终止
+FAIL_WINDOW_SEC = 600         # 持续 10 分钟（600s）连续失败（距上次成功）→ 强制终止
+
 
 def fetch_html(url, session, cookie=None, timeout=25):
     """Fetch HTML with SSL-retry + exponential backoff. Returns (text, status)."""
@@ -352,6 +356,24 @@ def main():
             print(f"[warn] Playwright unavailable: {e}", file=sys.stderr)
             pw = None
 
+    # 熔断状态
+    fail_streak = 0
+    last_success_ts = time.time()
+
+    def maybe_break():
+        """连续失败达上限，或持续 10 分钟连续失败 → 判定无效执行，强制终止。"""
+        if fail_streak >= CONSECUTIVE_FAIL_LIMIT:
+            print(f"\n[熔断] 连续 {fail_streak} 条获取失败（上限 {CONSECUTIVE_FAIL_LIMIT}），"
+                  f"判定为无效执行，强制终止。", file=sys.stderr)
+            atomic_save(out, args.out)
+            sys.exit(3)
+        if fail_streak > 0 and (time.time() - last_success_ts) >= FAIL_WINDOW_SEC:
+            print(f"\n[熔断] 已持续 {int(time.time() - last_success_ts)}s 连续获取失败"
+                  f"（上限 {FAIL_WINDOW_SEC}s），判定为无效执行，强制终止。",
+                  file=sys.stderr)
+            atomic_save(out, args.out)
+            sys.exit(3)
+
     try:
         for i, url in enumerate(urls, 1):
             if args.no_detail:
@@ -371,6 +393,7 @@ def main():
                 out["count"] = len(out["articles"])
                 atomic_save(out, args.out)   # 实时落盘
                 print(f"[{i}/{len(urls)}] (sitemap) {url}", file=sys.stderr)
+                fail_streak = 0  # 元数据采集，非失败
                 continue
 
             html, status = fetch_html(url, session, args.cookie)
@@ -392,6 +415,10 @@ def main():
                         html = ""
                 if not html:
                     print(f"  [skip] {url} (status {status})", file=sys.stderr)
+                    fail_streak += 1
+                    maybe_break()
+                    if args.delay and i < len(urls):
+                        time.sleep(args.delay)
                     continue
             try:
                 rec = parse_detail(html, url)
@@ -399,11 +426,20 @@ def main():
                 out["articles"].append(rec)
                 out["count"] = len(out["articles"])
                 atomic_save(out, args.out)   # 实时落盘（每篇）
+                has_content = bool(rec["content"])
                 print(f"[{i}/{len(urls)}] {rec['title'][:60] if rec['title'] else url} "
-                      f"| {rec['section']} | {('Y' if rec['content'] else 'N')}text "
+                      f"| {rec['section']} | {('Y' if has_content else 'N')}text "
                       f"| {len(rec['images'])}img", file=sys.stderr)
+                if has_content or rec["images"]:
+                    fail_streak = 0
+                    last_success_ts = time.time()
+                else:
+                    fail_streak += 1
+                    maybe_break()
             except Exception as e:
                 print(f"  [parse err] {url}: {e}", file=sys.stderr)
+                fail_streak += 1
+                maybe_break()
 
             if args.delay and i < len(urls):
                 time.sleep(args.delay)
