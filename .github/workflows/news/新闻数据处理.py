@@ -66,8 +66,8 @@ SOURCE_ALIASES = {
     "cna": "中央通讯社", "donga": "东亚日报", "gnews": "Google News",
     "irna": "伊朗通讯社(中文)", "irna_fa": "伊朗通讯社(波斯语)", "mena": "埃及中东通讯社",
     "mk": "每日经济新闻", "nikkei": "日本经济新闻", "rg": "俄罗斯报",
-    "ria": "俄新社", "scmp": "南华早报", "sputnik": "俄罗斯卫星通讯社",
-    "straitstimes": "海峡时报", "tass": "塔斯社",
+    "ria": "俄新社",     "scmp": "南华早报", "sputnik": "俄罗斯卫星通讯社",
+    "straitstimes": "海峡时报", "tass": "塔斯社", "hkcd": "香港商报", "hk01": "香港01", "hkcna": "香港中通社", "nhandan": "越南人民报", "leparisien": "巴黎人报", "lemonde": "世界报",
 }
 
 
@@ -235,26 +235,31 @@ def _fmt_item(item, preview_len=CONTENT_PREVIEW):
     """把单条新闻格式化为 Markdown 文本行。
 
     参数：
-      item         : 单条新闻字典（含 title/url/source/content/content_chars）
+      item         : 单条新闻字典（含 title/url/source/content/content_chars/images/type）
       preview_len  : 正文预览字数上限；为 None 表示「完整版」——不截断、全文输出
     返回：
-      (line, quote) 二元组：
-        line  : 标题行，形如  "- 标题。[来源](链接)"
-        quote : 正文引用行（缩进 + 引用符号 >），或 None（当没有正文时）
+      (line, extra) 二元组：
+        line  : 标题行，形如  "- 标题。[来源](链接)"；图表/组图类加 🖼️ 标记
+        extra : 附加行列表（缩进引用），含正文预览与图片（完整版才铺图链，简报版仅标数量）
     说明：
       - 简报版传 preview_len=300 -> 超长正文截断并在末尾加「…」，再标注「（全文 X 字）」；
-      - 完整版传 preview_len=None -> 正文原样输出，且不附加字数控告后缀。
+      - 完整版传 preview_len=None -> 正文原样输出，且不附加字数控告后缀；
+      - 图片：完整版铺出全部图链（不截断、不省略），简报版仅标「共 N 张图」，避免日报过长；
+      - type=="infographic"（越南人民报图表/组图类）标题加 🖼️ 标记，便于一眼区分。
     """
     src = item.get("source", "")         # 来源媒体
     url = item.get("url", "")            # 原文链接
     title = item.get("title", "")        # 标题
     content = item.get("content", "") or ""          # 正文（可能为空）
     chars = item.get("content_chars", len(content))  # 正文字数
+    itype = item.get("type", "") or ""                # 条目类型（infographic=图表/组图）
+    images = item.get("images", []) or []            # 图片列表（dict 含 url，或纯 url 字符串）
 
-    # 标题行：Markdown 无序列表 + 来源作为链接文本
-    line = f"- {title}。[{src}]({url})"
+    # 标题行：图表/组图类加 🖼️ 标记，便于日报一眼区分
+    prefix = "🖼️ " if itype == "infographic" else ""
+    line = f"- {prefix}{title}。[{src}]({url})"
 
-    quote = None
+    extra = []  # 附加行：正文引用 + 图片信息
     if content:
         # 把正文里的连续空白（换行/多空格）压成单个空格，并去掉首尾空白，便于在日报中单行显示
         clean = re.sub(r"\s+", " ", content).strip()
@@ -263,8 +268,18 @@ def _fmt_item(item, preview_len=CONTENT_PREVIEW):
             clean = clean[:preview_len] + "…"
         # 完整模式不加「（全文 X 字）」后缀；简报模式附加该字数控告
         suffix = "" if preview_len is None else f"（全文 {chars} 字）"
-        quote = f"  > {clean}{suffix}"  # 缩进两格 + Markdown 引用符号 >
-    return line, quote
+        extra.append(f"  > {clean}{suffix}")  # 缩进两格 + Markdown 引用符号 >
+
+    # 图片：完整版（preview_len=None）铺出全部图链，不截断不省略；简报版仅标数量
+    if images:
+        n = len(images)
+        extra.append(f"  > 📷 共 {n} 张图")
+        if preview_len is None:
+            for im in images:
+                u = im.get("url") if isinstance(im, dict) else im
+                if u:
+                    extra.append(f"  > ![]({u})")
+    return line, extra
 
 
 # ============================================================
@@ -306,10 +321,9 @@ def generate_markdown(date_str, categories, preview_len=CONTENT_PREVIEW, max_per
             lines.append(f"### {cat}\n")  # 子分类标题
             # max_per_cat 为 None 时输出全部；否则只取前 max_per_cat 条
             for item in (items if max_per_cat is None else items[:max_per_cat]):
-                line, quote = _fmt_item(item, preview_len)  # 渲染标题行 + 正文引用行
+                line, extra = _fmt_item(item, preview_len)  # 渲染标题行 + 附加行（正文/图片）
                 lines.append(line)
-                if quote:
-                    lines.append(quote)  # 有正文才追加引用行
+                lines.extend(extra)  # 追加正文引用与图片信息
             lines.append("")  # 分类之间空一行，提升可读性
 
     # ---------- 国内新闻板块 ----------
@@ -329,10 +343,9 @@ def generate_markdown(date_str, categories, preview_len=CONTENT_PREVIEW, max_per
                 continue
             lines.append(labels.get(cat, f"### {cat}") + "\n")
             for item in (items if max_per_cat is None else items[:max_per_cat]):
-                line, quote = _fmt_item(item, preview_len)
+                line, extra = _fmt_item(item, preview_len)
                 lines.append(line)
-                if quote:
-                    lines.append(quote)
+                lines.extend(extra)
             lines.append("")
 
     # ---------- 其他要闻板块 ----------
