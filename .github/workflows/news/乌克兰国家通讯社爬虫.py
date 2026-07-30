@@ -1,44 +1,44 @@
 #!/usr/bin/env python3
 """
-Ukrinform (Ukrainian National News Agency) crawler
-==================================================
-SSR site (clean HTML + JSON-LD NewsArticle). No JS challenge / no IP block
-observed from this environment. Dual-engine: static requests (primary) ->
-Playwright (fallback, rarely triggered).
+Ukrinform (乌克兰国家通讯社) 爬虫
+==================================
+乌克兰官方通讯社，SSR 网站（干净 HTML + JSON-LD NewsArticle 元数据），
+当前环境无 JS 挑战 / 无 IP 封禁。双引擎：静态 requests（主引擎）→
+Playwright（回退引擎，极少触发）。
 
-Discovery:
-  - sitemap.xml is a sitemap INDEX of 135 weekly sub-sitemaps
-    (currentweek.xml + /sitemap/2026/NN.xml by ISO week).
-  - last.xml = curated recent pool (~171 articles).
-  Both are reachable. We merge last.xml + currentweek.xml + the newest
-  --weeks weekly files (default weeks=1) and dedupe by URL.
+URL 发现：
+  - sitemap.xml 是一个索引文件，包含约 135 个每周子 sitemap
+    （currentweek.xml + /sitemap/2026/NN.xml 按 ISO 周编号）。
+  - last.xml = 近期精选文章池（约 171 篇）。
+  两者均可直接访问。合并 last.xml + currentweek.xml + 最新 --weeks 个
+  周文件，按 URL 去重。
 
-Article URL format:  /rubric-<code>/<id>-<slug>.html
-  e.g. /rubric-ato/4149008-russian-forces-injure-six-residents.html
-  rubric codes: ato, polytics, economy, sports, vidbudova, defense,
-                society, crime, emergencies, ...
+文章 URL 格式：  /rubric-<code>/<id>-<slug>.html
+  例：/rubric-ato/4149008-russian-forces-injure-six-residents.html
+  专栏代码：ato（战争）, polytics（政治）, economy（经济）, sports（体育）,
+            vidbudova（重建）, defense（国防）, society（社会）,
+            crime（犯罪）, emergencies（紧急事件）。
 
-Body container:  div.newsText  (clean <p> paragraphs). The page appends a
-  "Read also:" inline promo block at the end of the body -> trimmed.
+正文容器：  div.newsText（干净的 <p> 段落）。正文末尾追加了"Read also:"
+           内联推广块，抓取时自动截断。
 
-Metadata:
-  - title    : JSON-LD headline (cleanest)
-  - time     : JSON-LD datePublished (already +03:00 Kyiv)
-  - author   : JSON-LD author.name (agency -> "Ukrinform")
-  - image    : og:image / JSON-LD image (static.ukrinform.com)
-  - section  : rubric code from URL, mapped to friendly name
+元数据来源：
+  - title    : JSON-LD headline（最干净）
+  - time     : JSON-LD datePublished（已含 +03:00 基辅时区）
+  - author   : JSON-LD author.name（通讯社级 → "Ukrinform"）
+  - image    : og:image / JSON-LD image（static.ukrinform.com）
+  - section  : 从 URL 提取专栏代码，映射到友好名称
 
-Usage:
-  python ukrinform_crawler.py                 # default: last.xml + currentweek + 1 week
-  python ukrinform_crawler.py --limit 200     # cap articles
-  python ukrinform_crawler.py --no-detail     # sitemap-only metadata
-  python ukrinform_crawler.py --weeks 4       # backfill recent N weeks
-  python ukrinform_crawler.py --delay 3
-  python ukrinform_crawler.py --cookie "k=v;..."   # optional
-  python ukrinform_crawler.py --playwright    # force browser engine
+用法：
+  python 乌克兰国家通讯社爬虫.py                 # 默认：last.xml + currentweek + 1 周
+  python 乌克兰国家通讯社爬虫.py --limit 200     # 最多抓 200 篇
+  python 乌克兰国家通讯社爬虫.py --no-detail     # 仅 sitemap 元数据（不抓正文）
+  python 乌克兰国家通讯社爬虫.py --weeks 4       # 回填近 N 周
+  python 乌克兰国家通讯社爬虫.py --delay 3
+  python 乌克兰国家通讯社爬虫.py --cookie "k=v;..."   # 可选 Cookie
+  python 乌克兰国家通讯社爬虫.py --playwright    # 强制使用浏览器引擎
 
-Compliance: Ukrinform content is copyrighted; personal study/research only,
-no commercial redistribution.
+合规说明：Ukrinform 内容受版权保护，仅限个人学习/研究使用，禁止商业再分发。
 """
 import argparse
 import html as _html
@@ -53,45 +53,61 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-# ---- suppress noisy TLS warnings (we use verify=False for flaky SSL) ----
+# ---- 抑制 SSL 警告（我们使用 verify=False 处理不稳定的 SSL） ----
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# 站点根 URL
 BASE = "https://www.ukrinform.net"
+
+# 通用 User-Agent（伪装为 Chrome 浏览器）
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+# 通用请求头：UA + 语言偏好（英语为主，乌克兰语/俄语兜底）
 HEADERS = {
     "User-Agent": UA,
     "Accept-Language": "en;q=0.9,uk;q=0.8,ru;q=0.7",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# rubric code -> friendly section name (Ukrainian agency taxonomy)
+# 专栏代码 → 友好名称映射（乌克兰通讯社文章分类体系）
 RUBRIC_MAP = {
-    "ato": "War",
-    "polytics": "Politics",
-    "economy": "Economy",
-    "sports": "Sports",
-    "vidbudova": "Reconstruction",
-    "defense": "Defense",
-    "society": "Society",
-    "crime": "Crime",
-    "emergencies": "Emergencies",
+    "ato": "War",          # 战争/军事行动
+    "polytics": "Politics",    # 政治
+    "economy": "Economy",      # 经济
+    "sports": "Sports",        # 体育
+    "vidbudova": "Reconstruction",  # 重建
+    "defense": "Defense",      # 国防
+    "society": "Society",      # 社会
+    "crime": "Crime",          # 犯罪
+    "emergencies": "Emergencies",   # 紧急事件
 }
 
-# content noise markers appended to body
+# 正文末尾推广块标记：匹配 "Read also:" 及其变体，从该处截断正文
 READ_ALSO_RE = re.compile(r"\s*read also[:\s]", re.IGNORECASE)
 
-SSL_RETRIES = 5
-BACKOFF = 2.0
-
-# 熔断（circuit-breaker）：防止爬虫进入「持续获取失败」死循环 = 无效执行
-CONSECUTIVE_FAIL_LIMIT = 20   # 连续 20 条获取失败（正文为空/被跳过/解析异常）→ 强制终止
-FAIL_WINDOW_SEC = 600         # 持续 10 分钟（600s）连续失败（距上次成功）→ 强制终止
+# SSL 重试策略
+SSL_RETRIES = 5      # 最大重试次数
+BACKOFF = 2.0        # 退避基础秒数（每次重试 2×n 秒）
 
 
 def fetch_html(url, session, cookie=None, timeout=25):
-    """Fetch HTML with SSL-retry + exponential backoff. Returns (text, status)."""
+    """获取 HTML，含 SSL 重试 + 指数退避。
+
+    参数：
+        url     : 目标 URL
+        session : requests.Session 实例（复用连接池）
+        cookie  : 可选 Cookie 字符串（直接注入请求头）
+        timeout : 单次请求超时（秒）
+
+    返回：
+        (html正文, HTTP状态码)  或  ("", -1) 表示全部重试失败
+
+    策略：
+        - HTTP 403/404/410/401 → 立即放弃（不值得重试）
+        - 其他错误 → 退避重试（2s × 重试次数）
+    """
     headers = dict(HEADERS)
     if cookie:
         headers["Cookie"] = cookie
@@ -113,7 +129,23 @@ def fetch_html(url, session, cookie=None, timeout=25):
 
 
 def discover_urls(session, weeks, cookie, verbose=True):
-    """Return list of unique article URLs from sitemaps."""
+    """从 sitemap 发现并去重文章 URL 列表。
+
+    流程：
+        1) 获取 sitemap.xml 索引，提取所有子 sitemap 地址
+        2) 获取 last.xml（近期精选文章池）
+        3) 从索引中筛选每周 sitemap，取最新 N 个（由 weeks 参数控制）
+        4) 合并上述所有来源，按 URL 去重后返回
+
+    参数：
+        session : requests.Session
+        weeks   : 包含最新 N 个周文件
+        cookie  : 可选 Cookie
+        verbose : 是否打印发现日志
+
+    返回：
+        去重后文章 URL 列表
+    """
     subs = []
     # 1) index
     idx_text, _ = fetch_html(urljoin(BASE, "/sitemap.xml"), session, cookie)
@@ -161,14 +193,38 @@ def discover_urls(session, weeks, cookie, verbose=True):
 
 
 def is_article_url(url):
-    """Ukrinform article: /rubric-<code>/<id>-<slug>.html"""
+    """判断 URL 是否为有效文章链接。
+
+    Ukrinform 文章标准格式：/rubric-<专栏代码>/<ID>-<slug>.html
+
+    返回：
+        True  = 是有效文章，False = 不是
+    """
     if "ukrinform.net" not in url:
         return False
     return bool(re.search(r"/rubric-[a-z]+/\d+-[a-z0-9-]+\.html$", url))
 
 
 def parse_detail(html, url):
-    """Extract structured article data from detail HTML."""
+    """从文章详情页 HTML 提取结构化数据。
+
+    提取顺序（按优先级）：
+        - 专栏：从 URL 路径中提取 rubric 代码，映射为友好名称
+        - 标题：JSON-LD headline → h1 → og:title
+        - 时间：JSON-LD datePublished → meta article:published_time
+        - 作者：JSON-LD author.name → 默认 "Ukrinform"
+        - 正文：div.newsText 内的 <p> 段落（遇 "Read also" 截断）→ 兜底 <article>
+        - 图片：JSON-LD image → og:image
+        - 标签：meta keywords → JSON-LD keywords
+
+    参数：
+        html : 文章页面 HTML 源码
+        url  : 文章 URL（用于提取专栏代码）
+
+    返回：
+        结构化字典：{title, section, section_code, published_at, author,
+                     content, images, tags, url}
+    """
     soup = BeautifulSoup(html, "html.parser")
     data = {
         "title": None, "section": None, "section_code": None,
@@ -176,13 +232,13 @@ def parse_detail(html, url):
         "images": [], "tags": [], "url": url,
     }
 
-    # ---- section from URL rubric code ----
+    # ---- 从 URL 提取专栏代码 ----
     m = re.search(r"/rubric-([a-z]+)/", url)
     code = m.group(1) if m else None
     data["section_code"] = code
     data["section"] = RUBRIC_MAP.get(code, (code.capitalize() if code else None))
 
-    # ---- JSON-LD ----
+    # ---- JSON-LD 结构化数据解析（最可靠） ----
     ld = None
     m = re.search(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
                   html, re.S)
@@ -208,7 +264,7 @@ def parse_detail(html, url):
         elif isinstance(imgs, str):
             data["images"] = [{"url": imgs, "caption": ""}]
 
-    # ---- title fallback ----
+    # ---- 标题兜底：h1 → og:title ----
     if not data["title"]:
         h1 = soup.find("h1")
         if h1:
@@ -218,11 +274,11 @@ def parse_detail(html, url):
         if og and og.get("content"):
             data["title"] = _html.unescape(og["content"].strip())
 
-    # ---- author fallback ----
+    # ---- 作者兜底（JSON-LD 无作者时默认署名）----
     if not data["author"]:
         data["author"] = "Ukrinform"
 
-    # ---- time fallback (meta) ----
+    # ---- 时间兜底：从 meta 标签提取 ----
     if not data["published_at"]:
         for prop in ("article:published_time", "article:modified_time"):
             mt = soup.find("meta", attrs={"property": prop})
@@ -230,7 +286,7 @@ def parse_detail(html, url):
                 data["published_at"] = normalize_time(mt["content"])
                 break
 
-    # ---- body: div.newsText ----
+    # ---- 正文：div.newsText（主容器）----
     body_text = ""
     nt = soup.find("div", class_="newsText")
     if nt:
@@ -240,30 +296,30 @@ def parse_detail(html, url):
             if not t:
                 continue
             if READ_ALSO_RE.search(t):
-                break  # truncate at "Read also" promo
+                break  # 遇 "Read also" 推广块截断，去掉尾部无关内容
             parts.append(t)
         body_text = "\n\n".join(parts)
-    # fallback: generic article container
+    # 兜底1：通用文章容器 class
     if not body_text:
         for cls in ("newsHolderContainer", "articleBody", "article-body", "content"):
             el = soup.find("div", class_=cls)
             if el:
                 body_text = el.get_text("\n\n", strip=True)
                 break
-    # fallback: <article>
+    # 兜底2：<article> 标签
     if not body_text:
         art = soup.find("article")
         if art:
             body_text = art.get_text("\n\n", strip=True)
     data["content"] = body_text.strip()
 
-    # ---- image fallback (og:image) ----
+    # ---- 图片兜底：og:image ----
     if not data["images"]:
         og = soup.find("meta", attrs={"property": "og:image"})
         if og and og.get("content"):
             data["images"] = [{"url": og["content"], "caption": ""}]
 
-    # ---- tags ----
+    # ---- 标签：meta keywords → JSON-LD keywords ----
     kw = soup.find("meta", attrs={"name": "keywords"})
     if kw and kw.get("content"):
         data["tags"] = [t.strip() for t in kw["content"].split(",") if t.strip()]
@@ -274,8 +330,17 @@ def parse_detail(html, url):
 
 
 def normalize_time(s):
-    """Parse ISO / RFC822 time to tz-aware ISO string. Ukrinform uses
-    +03:00 (Kyiv). Never do datetime+Nh hacks."""
+    """解析 ISO / RFC822 时间字符串，返回含时区的 ISO 格式字符串。
+
+    Ukrinform 使用 +03:00（基辅时区）。如果有歧义，不要用 datetime+Nh 的
+    硬编码方式推算时区——尊重原文传递的信息。
+
+    参数：
+        s : 原始时间字符串
+
+    返回：
+        ISO 8601 格式时间字符串（含时区），无法解析时原样返回
+    """
     s = s.strip()
     # try ISO
     try:
@@ -311,24 +376,45 @@ def atomic_save(records, path=None, source="Ukrinform"):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Ukrinform crawler")
-    ap.add_argument("--limit", type=int, default=0, help="max articles (0=all)")
+    """主入口：发现 URL → 逐篇获取/解析 → 实时原子落盘。
+
+    流程：
+        1) 解析命令行参数
+        2) 从 sitemap 发现文章 URL 列表
+        3) 逐篇 fetch + parse（或 --no-detail 仅 sitemap 元数据）
+        4) 每篇实时 atomic_save（进程中断不丢进度）
+        6) Playwright 回退（--playwright 参数启用）
+
+    参数：（见 argparse 定义）
+        --limit, --no-detail, --weeks, --delay, --cookie, --playwright, --out, --root
+    """
+    ap = argparse.ArgumentParser(description="Ukrinform（乌克兰国家通讯社）爬虫")
+    ap.add_argument("--limit", type=int, default=0, help="最多获取文章数（0=不限）")
     ap.add_argument("--no-detail", action="store_true",
-                    help="sitemap-only metadata (skip detail fetch)")
+                    help="仅获取 sitemap 元数据（跳过抓取正文）")
     ap.add_argument("--weeks", type=int, default=1,
-                    help="recent weekly sub-sitemaps to include (default 1)")
-    ap.add_argument("--delay", type=float, default=2.0, help="delay between requests")
-    ap.add_argument("--cookie", type=str, default=None, help="optional Cookie header")
-    ap.add_argument("--playwright", action="store_true", help="force Playwright engine")
-    ap.add_argument("--out", type=str, default="data/新闻/ukrinform_collection.json")
+                    help="包含最新 N 个周的子 sitemap（默认 1 周）")
+    ap.add_argument("--delay", type=float, default=2.0, help="请求间隔（秒）")
+    ap.add_argument("--cookie", type=str, default=None, help="可选 Cookie 字符串")
+    ap.add_argument("--playwright", action="store_true", help="强制使用 Playwright 浏览器引擎")
+    ap.add_argument("--out", type=str, default="data/新闻/ukrinform_collection.json",
+                    help="输出文件路径")
     ap.add_argument("--root", type=str, default=None,
-                    help="override discovery root (single sitemap URL)")
+                    help="替换发现入口：直接使用指定的 sitemap URL 作为唯一来源")
     args = ap.parse_args()
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # discovery
+    # 进度容器提前初始化：让「链接采集」阶段也受 Ctrl+C 保护（中断即可落盘已发现链接）
+    out = {
+        "source": "Ukrinform (Ukrainian National News Agency)",
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "count": 0,
+        "articles": [],
+    }
+
+    # ---- 发现 URL 列表 ----
     if args.root:
         txt, _ = fetch_html(args.root, session, args.cookie)
         locs = re.findall(r"<loc>(.*?)</loc>", txt) if txt else []
@@ -341,12 +427,6 @@ def main():
     if args.limit:
         urls = urls[: args.limit]
 
-    out = {
-        "source": "Ukrinform (Ukrainian National News Agency)",
-        "collected_at": datetime.now(timezone.utc).isoformat(),
-        "count": 0,
-        "articles": [],
-    }
     pw = None
     if args.playwright:
         try:
@@ -355,24 +435,6 @@ def main():
         except Exception as e:
             print(f"[warn] Playwright unavailable: {e}", file=sys.stderr)
             pw = None
-
-    # 熔断状态
-    fail_streak = 0
-    last_success_ts = time.time()
-
-    def maybe_break():
-        """连续失败达上限，或持续 10 分钟连续失败 → 判定无效执行，强制终止。"""
-        if fail_streak >= CONSECUTIVE_FAIL_LIMIT:
-            print(f"\n[熔断] 连续 {fail_streak} 条获取失败（上限 {CONSECUTIVE_FAIL_LIMIT}），"
-                  f"判定为无效执行，强制终止。", file=sys.stderr)
-            atomic_save(out, args.out)
-            sys.exit(3)
-        if fail_streak > 0 and (time.time() - last_success_ts) >= FAIL_WINDOW_SEC:
-            print(f"\n[熔断] 已持续 {int(time.time() - last_success_ts)}s 连续获取失败"
-                  f"（上限 {FAIL_WINDOW_SEC}s），判定为无效执行，强制终止。",
-                  file=sys.stderr)
-            atomic_save(out, args.out)
-            sys.exit(3)
 
     try:
         for i, url in enumerate(urls, 1):
@@ -393,12 +455,11 @@ def main():
                 out["count"] = len(out["articles"])
                 atomic_save(out, args.out)   # 实时落盘
                 print(f"[{i}/{len(urls)}] (sitemap) {url}", file=sys.stderr)
-                fail_streak = 0  # 元数据采集，非失败
                 continue
 
             html, status = fetch_html(url, session, args.cookie)
             if status != 200 or not html:
-                # try Playwright fallback
+                # Playwright 回退：静态获取失败时尝试浏览器渲染
                 if pw:
                     try:
                         b = pw.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -415,8 +476,6 @@ def main():
                         html = ""
                 if not html:
                     print(f"  [skip] {url} (status {status})", file=sys.stderr)
-                    fail_streak += 1
-                    maybe_break()
                     if args.delay and i < len(urls):
                         time.sleep(args.delay)
                     continue
@@ -430,23 +489,22 @@ def main():
                 print(f"[{i}/{len(urls)}] {rec['title'][:60] if rec['title'] else url} "
                       f"| {rec['section']} | {('Y' if has_content else 'N')}text "
                       f"| {len(rec['images'])}img", file=sys.stderr)
-                if has_content or rec["images"]:
-                    fail_streak = 0
-                    last_success_ts = time.time()
-                else:
-                    fail_streak += 1
-                    maybe_break()
             except Exception as e:
                 print(f"  [parse err] {url}: {e}", file=sys.stderr)
-                fail_streak += 1
-                maybe_break()
 
             if args.delay and i < len(urls):
                 time.sleep(args.delay)
-    except (KeyboardInterrupt, Exception) as e:
-        print(f"\n[中断] 已保存中断前进度（{len(out['articles'])} 篇）-> {args.out}",
-              file=sys.stderr)
+    except KeyboardInterrupt:
+        # 优雅退出：实时落盘当前进度，打印友好提示，退出码 130（不甩堆栈）
         atomic_save(out, args.out)
+        print(f"[interrupted] 已实时保存至当前进度（{len(out['articles'])} 篇）→ {args.out}",
+              file=sys.stderr)
+        sys.exit(130)
+    except Exception as e:
+        # 真实异常：落盘后照常抛出，保留完整 traceback 供排查
+        atomic_save(out, args.out)
+        print(f"\n[error] 抓取异常，已保存当前进度（{len(out['articles'])} 篇）→ {args.out}",
+              file=sys.stderr)
         raise
 
     if pw:
@@ -460,7 +518,10 @@ def main():
 
 
 def slug_title(url):
-    """Fallback title from slug: /rubric-x/123-some-words.html -> Some Words"""
+    """从 URL slug 提取标题兜底：/rubric-x/123-some-words.html → "Some Words"
+
+    当 --no-detail 模式跳过正文获取时，用此函数生成一个基本可读的标题。
+    """
     m = re.search(r"/\d+-([a-z0-9-]+)\.html$", url)
     if not m:
         return url
