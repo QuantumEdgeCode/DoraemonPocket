@@ -5,9 +5,9 @@
 #          每个爬虫独立 runner：记录节点 IP、耗时、成功/失败
 #          全部完成后汇总统计、打包数据、计算 SHA256、创建 Release
 #          通过邮件和 Telegram 发送通知（含全部节点 IP 与耗时）
-# 文件路径：.github/workflows/新闻工作流.yml
-# 魔改自：通达信数据获取.yml（通达信多IP并行下载工作流）
-# 更新时间：2026-07-30
+# 文件路径：.github/workflows/run-crawlers.yml
+# 魔改自：download-tdx-data.yml（通达信多IP并行下载工作流）
+# 更新时间：2026-07-29
 # ============================================================
 
 name: 新闻爬虫批量执行（多IP并行）
@@ -163,7 +163,6 @@ jobs:
           # 爬虫脚本存放目录（仓库根下的 .github/workflows/news/）
           SCRIPTS_DIR=".github/workflows/news"
           SCRIPT_PATH="$SCRIPTS_DIR/${{ matrix.file.file }}"
-          LOG_FILE="crawler_run.log"
           echo "正在执行: $SCRIPT_PATH"
 
           # 防御：确认爬虫脚本存在于 news 子目录，避免路径错位导致含糊失败
@@ -171,10 +170,8 @@ jobs:
             echo "错误：找不到爬虫脚本 $SCRIPT_PATH（应在 ${SCRIPTS_DIR}/ 目录）"
             STATUS="MISSING"
           else
-            # 前台直接执行爬虫，日志落盘；以进程退出码判定成败
-            python "$SCRIPT_PATH" ${{ inputs.crawl_args }} > "$LOG_FILE" 2>&1
-            RC=$?
-            if [ "$RC" -eq 0 ]; then
+            # 执行爬虫；crawl_args 来自手动触发输入（可留空）
+            if python "$SCRIPT_PATH" ${{ inputs.crawl_args }}; then
               STATUS="SUCCESS"
             else
               STATUS="FAILED"
