@@ -116,13 +116,13 @@ jobs:
       # 步骤1：检出仓库（拿到 .py 爬虫与 data/ 目录）
       # ----------------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ----------------------------------------------------------
       # 步骤2：配置 Python 环境
       # ----------------------------------------------------------
       - name: 设置 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -240,7 +240,7 @@ jobs:
           echo "时段标识(am=上午/pm=晚上): ${SLOT}"
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 下载所有分片 Artifact
         uses: actions/download-artifact@v4
@@ -342,7 +342,7 @@ jobs:
       # 输出 news_daily_{date}.md（简报）与 news_daily_{date}_full.md（完整版）到 $SUMMARY_DIR。
       # ----------------------------------------------------------
       - name: 设置 Python（数据处理用）
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -381,9 +381,28 @@ jobs:
       # 打包汇总数据（所有爬虫 json + 校验文件）
       # ----------------------------------------------------------
       - name: 打包汇总数据
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SUMMARY_DIR="${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
-          ZIP_NAME="新闻数据${SUMMARY_DIR}.zip"
+          BASE="新闻数据${SUMMARY_DIR}"
+          TAG="v${SUMMARY_DIR}"
+
+          # 默认名；若 Release 中已存在同名 asset（同 slot 重跑），则自动递增 -1 / -2 / -3
+          # 避免 softprops/action-gh-release 在 overwrite 上传 zip 时的 already_exists 竞态
+          ZIP_NAME="${BASE}.zip"
+          EXISTING=""
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING=$(gh release view "$TAG" --json assets -q ".assets[].name" 2>/dev/null || true)
+          fi
+          n=1
+          while printf '%s\n' "$EXISTING" | grep -qx "$ZIP_NAME"; do
+            ZIP_NAME="${BASE}-${n}.zip"
+            n=$((n + 1))
+          done
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+          echo "最终 zip 名（撞名自动递增）: $ZIP_NAME"
+
           if [ -d "$SUMMARY_DIR" ]; then
             cd "$SUMMARY_DIR" && zip -9 -r "../${ZIP_NAME}" . && cd ..
             ls -lh "$ZIP_NAME"
@@ -461,13 +480,14 @@ jobs:
       # ----------------------------------------------------------
       - name: 创建 Release
         if: ${{ inputs.make_release == true }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}
           name: 新闻爬虫数据 - ${{ steps.date.outputs.date }} (${{ steps.date.outputs.slot == 'am' && '上午' || '晚上' }})
           body_path: release_body.md
+          overwrite_files: true
           files: |
-            新闻数据${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}.zip
+            ${{ env.ZIP_NAME }}
             ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}/SHA256SUMS.txt
             ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}/news_daily_${{ steps.date.outputs.date }}.md
             ${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}/news_daily_${{ steps.date.outputs.date }}_full.md
