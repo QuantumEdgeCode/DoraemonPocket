@@ -151,7 +151,7 @@ jobs:
       # ----------------------------------------------------------
       # 步骤5：执行爬虫并记录节点 IP / 耗时 / 状态
       # ----------------------------------------------------------
-      - name: 执行 ${{ matrix.file.file }}
+      - name: 执行 ${{ matrix.file.file }}（含熔断看门狗）
         id: run_py
         continue-on-error: true   # 允许失败，结果记入 result.txt，不中断矩阵
         working-directory: ${{ github.workspace }}   # 仓库根（爬虫脚本在 .github/workflows/news/ 子目录）
@@ -163,6 +163,7 @@ jobs:
           # 爬虫脚本存放目录（仓库根下的 .github/workflows/news/）
           SCRIPTS_DIR=".github/workflows/news"
           SCRIPT_PATH="$SCRIPTS_DIR/${{ matrix.file.file }}"
+          LOG_FILE="crawler_run.log"
           echo "正在执行: $SCRIPT_PATH"
 
           # 防御：确认爬虫脚本存在于 news 子目录，避免路径错位导致含糊失败
@@ -170,11 +171,68 @@ jobs:
             echo "错误：找不到爬虫脚本 $SCRIPT_PATH（应在 ${SCRIPTS_DIR}/ 目录）"
             STATUS="MISSING"
           else
-            # 执行爬虫；crawl_args 来自手动触发输入（可留空）
-            if python "$SCRIPT_PATH" ${{ inputs.crawl_args }}; then
-              STATUS="SUCCESS"
+            # 后台启动爬虫，日志落盘（看门狗据此判断死循环）
+            python "$SCRIPT_PATH" ${{ inputs.crawl_args }} > "$LOG_FILE" 2>&1 &
+            PID=$!
+
+            # ============================================================
+            # 熔断看门狗：对日志负责
+            #   规则1：连续 20 条获取失败（Ntext/[skip]/[parse err]/获取失败）→ 强制掐断
+            #   规则2：持续 10 分钟连续失败（距上次成功已超 600s 且期间有失败）→ 强制掐断
+            #   理由：继续下去属于无效执行，浪费 runner 时长
+            # ============================================================
+            FAIL_LIMIT=20
+            TEN_MIN=600
+            FAIL_STREAK=0
+            LAST_OK=$NODE_START
+            OFFSET=0
+            KILL_REASON=""
+            while kill -0 "$PID" 2>/dev/null; do
+              NOW=$(date +%s)
+              if [ -f "$LOG_FILE" ]; then
+                # 增量读取日志新增字节（避免重复扫描）
+                NEW=$(tail -c +$((OFFSET + 1)) "$LOG_FILE")
+                OFFSET=$(wc -c < "$LOG_FILE" | tr -d ' ')
+                # 逐行判定成功/失败标记
+                while IFS= read -r line; do
+                  # 成功：含 Ytext（已提取正文）或确认写入完成
+                  if echo "$line" | grep -qE '\| Ytext |保存到|\[done\]|写入成功|已写出'; then
+                    FAIL_STREAK=0
+                    LAST_OK=$NOW
+                  # 失败：正文为空(Ntext) / 获取跳过 / 解析异常 / 显式获取失败 / 硬错误码
+                  elif echo "$line" | grep -qE 'Ntext|\[skip\]|\[parse err\]|获取失败|状态码 40[0-9]|HTTP 40[0-9]'; then
+                    FAIL_STREAK=$((FAIL_STREAK + 1))
+                  fi
+                done <<< "$NEW"
+              fi
+
+              # 规则1：连续 20 条获取失败
+              if [ "$FAIL_STREAK" -ge "$FAIL_LIMIT" ]; then
+                KILL_REASON="连续${FAIL_STREAK}条获取失败（达上限${FAIL_LIMIT}）"
+                break
+              fi
+              # 规则2：持续 10 分钟连续失败
+              if [ "$FAIL_STREAK" -gt 0 ] && [ $((NOW - LAST_OK)) -ge "$TEN_MIN" ]; then
+                KILL_REASON="持续$(( (NOW - LAST_OK) / 60 ))分钟连续获取失败（达10分钟上限）"
+                break
+              fi
+              sleep 15
+            done
+
+            # 触发熔断 → 强制掐断
+            if [ -n "$KILL_REASON" ]; then
+              echo "🛑 [熔断] $KILL_REASON —— 强制终止 ${{ matrix.file.file }}（PID=$PID）"
+              kill -9 "$PID" 2>/dev/null || true
+              pkill -9 -f "$SCRIPT_PATH" 2>/dev/null || true
+              wait "$PID" 2>/dev/null || true
+              STATUS="FAILED_CIRCUIT"
             else
-              STATUS="FAILED"
+              wait "$PID"; RC=$?
+              if [ "$RC" -eq 0 ]; then
+                STATUS="SUCCESS"
+              else
+                STATUS="FAILED"
+              fi
             fi
           fi
 
