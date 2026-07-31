@@ -1,0 +1,6 @@
+# 新闻爬虫统一依赖清单（供 GitHub Actions 步骤3 与 pip 缓存使用）
+# 改动此文件会触发缓存键变更 -> 下次运行重新拉取依赖
+requests
+beautifulsoup4
+lxml
+playwright
