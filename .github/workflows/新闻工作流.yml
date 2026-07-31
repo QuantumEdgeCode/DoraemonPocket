@@ -94,7 +94,6 @@ jobs:
           - { name: asahi,      file: 朝日新闻爬虫.py }
           - { name: donga,      file: 东亚日报爬虫.py }
           - { name: rg,         file: 俄罗斯报爬虫.py }
-          - { name: ng,         file: 俄罗斯独立报爬虫.py }
           - { name: sputnik,    file: 俄罗斯卫星通讯社爬虫.py }
           - { name: ria,        file: 俄新社爬虫.py }
           - { name: gnews,      file: 谷歌新闻爬虫.py }
