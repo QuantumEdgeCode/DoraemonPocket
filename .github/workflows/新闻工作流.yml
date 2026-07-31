@@ -125,6 +125,8 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
 
       # ----------------------------------------------------------
       # 步骤3：安装依赖（优先 requirements.txt，否则装基础包）
@@ -139,8 +141,23 @@ jobs:
           fi
 
       # ----------------------------------------------------------
-      # 步骤4：（可选）安装 Playwright 浏览器
+      # 步骤4：缓存 Playwright 浏览器二进制
+      # ~/.cache/ms-playwright 体积大(~150MB)，缓存后二次运行秒级恢复
+      # 仅在勾选 install_playwright 时与步骤4安装同步生效
+      # ----------------------------------------------------------
+      - name: 缓存 Playwright 浏览器
+        if: ${{ inputs.install_playwright == true }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-browser-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pw-browser-${{ runner.os }}-
+
+      # ----------------------------------------------------------
+      # 步骤4：安装 Playwright 浏览器
       # 仅在手动触发且勾选 install_playwright 时执行（耗时较大）
+      # 浏览器二进制已由上方缓存步骤恢复，命中缓存时跳过下载仅补系统依赖
       # ----------------------------------------------------------
       - name: 安装 Playwright 浏览器
         if: ${{ inputs.install_playwright == true }}
