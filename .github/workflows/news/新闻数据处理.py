@@ -353,10 +353,10 @@ def generate_markdown(date_str, categories, preview_len=CONTENT_PREVIEW, max_per
     if others:
         lines.append("### 📌 其他要闻\n")
         for item in (others if max_other is None else others[:max_other]):
-            line, quote = _fmt_item(item, preview_len)
+            line, extra = _fmt_item(item, preview_len)
             lines.append(line)
-            if quote:
-                lines.append(quote)
+            if extra:
+                lines.extend(extra)  # extra 是附加行列表, 必须 extend 展开(不能 append 整列表)
         # 若「其他」被截断（限制了条数且实际更多），追加一行提示真实总数
         if max_other is not None and len(others) > max_other:
             lines.append(f"- ……（其他要闻共 {len(others)} 条，仅显示前 {max_other} 条）")
