@@ -498,7 +498,7 @@ jobs:
       # 创建 GitHub Release（可关闭）
       # ----------------------------------------------------------
       - name: 创建 Release
-        if: ${{ inputs.make_release == true }}
+        if: ${{ github.event_name == 'schedule' || inputs.make_release == true }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}
