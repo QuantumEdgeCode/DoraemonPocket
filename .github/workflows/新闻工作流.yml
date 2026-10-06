@@ -216,7 +216,7 @@ jobs:
           path: |
             result.txt
             data/新闻/**/*.json
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: ignore   # 爬虫失败时可能没有 json，忽略
 
   # ============================================================
