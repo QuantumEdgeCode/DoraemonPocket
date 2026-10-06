@@ -54,7 +54,7 @@ jobs:
   # 作业0：记录工作流开始时间（所有 job 之前执行）
   # ============================================================
   record-start-time:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       workflow_start: ${{ steps.set_start.outputs.workflow_start }}
       workflow_start_time: ${{ steps.set_start.outputs.workflow_start_time }}
@@ -77,7 +77,7 @@ jobs:
   # ============================================================
   run-crawlers:
     needs: record-start-time
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360  # 单个爬虫 job 超时上限（GitHub 单 job 上限 6h，已拉满；GitHub 仓库设置里没有可改的「Workflow timeout」项，无需改动）
     strategy:
       fail-fast: false    # 单个爬虫失败不影响其他
@@ -226,7 +226,7 @@ jobs:
   collect-and-release:
     needs: [record-start-time, run-crawlers]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
@@ -620,8 +620,8 @@ jobs:
               <div class="section">
                 <h2>🔗 Release 数据发布</h2>
                 <div class="release-box">
-                  <a class="release-btn" href="https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}">📦 查看 / 下载本次数据</a>
-                  <span class="release-url">https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}</span>
+                  <a class="release-btn" href="https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}">📦 查看 / 下载本次数据</a>
+                  <span class="release-url">https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}</span>
                 </div>
               </div>
             </div>
@@ -651,7 +651,7 @@ jobs:
           执行节点IP:
           ${{ steps.collect.outputs.ip_list }}
 
-          🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}"
+          🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ steps.date.outputs.date }}-${{ steps.date.outputs.slot }}"
 
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT_ID}" \
