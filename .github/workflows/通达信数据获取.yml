@@ -31,6 +31,11 @@ permissions:
   contents: write  # 允许创建和更新 Release
   actions: read    # 允许读取工作流运行信息
 
+# 防止重叠运行：同一分支同时只跑一个实例，新触发排队而非取消
+concurrency:
+  group: tdx-download-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ============================================================
   # 作业0：记录工作流开始时间（所有job之前执行）
@@ -139,8 +144,12 @@ jobs:
     steps:
       # ----------------------------------------------------------
       # 步骤1：下载单个文件并记录节点IP信息
+      # 成败均写入 ip_info.txt（SUCCESS/FAILED），失败不中断作业，
+      # 由汇总环节统一统计与呈现（参考新闻爬虫工作流的容错模式）
       # ----------------------------------------------------------
       - name: 下载 ${{ matrix.file.desc }}
+        # 单文件下载失败不使整个矩阵失败，结果交汇总环节呈现
+        continue-on-error: true
         run: |
           # 记录本节点开始下载时间
           NODE_START=$(date -u +%s)
@@ -152,43 +161,50 @@ jobs:
 
           # 使用wget下载文件，设置超时30秒，最多重试3次
           if wget --timeout=30 --tries=3 -q "${{ matrix.file.url }}" -O "${{ matrix.file.name }}.zip"; then
-            # 记录本节点结束下载时间
-            NODE_END=$(date -u +%s)
-            # 计算本节点下载耗时（秒）
-            NODE_DURATION=$((NODE_END - NODE_START))
-
+            STATUS="SUCCESS"
             # 获取文件大小（字节）
             SIZE=$(stat -c%s "${{ matrix.file.name }}.zip")
             # 转换为KB便于阅读
             SIZE_KB=$((SIZE / 1024))
             # 计算文件SHA256哈希值
             SHA256=$(sha256sum "${{ matrix.file.name }}.zip" | awk '{print $1}')
-
-            echo "下载成功 - 大小: ${SIZE_KB}KB - 耗时: ${NODE_DURATION}秒 - IP: ${IP}"
-
-            # 将节点信息保存到文件（格式：文件名|描述|IP|大小|SHA256|节点耗时）
-            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|${IP}|${SIZE_KB}KB|${SHA256}|${NODE_DURATION}秒" > ip_info.txt
           else
-            # 下载失败时记录失败信息并退出
-            echo "下载失败: ${{ matrix.file.name }}.zip"
-            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|FAILED|-|-|0秒" > ip_info.txt
-            exit 1
+            STATUS="FAILED"
+            # 清理可能的半成品文件
+            rm -f "${{ matrix.file.name }}.zip"
+          fi
+
+          # 记录本节点结束下载时间与耗时（无论成败）
+          NODE_END=$(date -u +%s)
+          NODE_DURATION=$((NODE_END - NODE_START))
+
+          # 将节点信息保存到文件（格式：文件名|描述|状态|IP|大小|SHA256|节点耗时）
+          if [ "$STATUS" = "SUCCESS" ]; then
+            echo "下载成功 - 大小: ${SIZE_KB}KB - 耗时: ${NODE_DURATION}秒 - IP: ${IP}"
+            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|SUCCESS|${IP}|${SIZE_KB}KB|${SHA256}|${NODE_DURATION}秒" > ip_info.txt
+          else
+            echo "下载失败 - 耗时: ${NODE_DURATION}秒 - IP: ${IP}"
+            echo "${{ matrix.file.name }}|${{ matrix.file.desc }}|FAILED|${IP}|-|-|${NODE_DURATION}秒" > ip_info.txt
           fi
 
       # ----------------------------------------------------------
       # 步骤2：上传下载的文件和IP信息为Artifact
+      # 即使本节点下载失败（无 zip）也上传 ip_info.txt，供汇总统计
       # ----------------------------------------------------------
       - name: 上传文件到 Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           # Artifact名称包含文件名，避免13个任务之间的冲突
           name: file-${{ matrix.file.name }}
-          # 上传zip文件和IP信息文件
+          # 上传zip文件和IP信息文件（失败时可能只有后者）
           path: |
             ${{ matrix.file.name }}.zip
             ip_info.txt
           # Artifact保留1天后自动删除（节省存储空间）
           retention-days: 1
+          # 下载失败时可能没有 zip，忽略缺失
+          if-no-files-found: ignore
 
   # ============================================================
   # 作业2：合并文件、收集IP、打包发布、发送通知
@@ -205,6 +221,8 @@ jobs:
   merge-and-release:
     # 需要等待记录开始时间和所有下载任务完成
     needs: [record-start-time, download-files]
+    # 即使部分下载失败也照常汇总（失败项以 ❌ 呈现），不中断发布与通知
+    if: always()
     # 运行环境：Ubuntu最新版
     runs-on: ubuntu-latest
     # 合并任务超时时间（30分钟）
@@ -260,6 +278,7 @@ jobs:
 
       # ----------------------------------------------------------
       # 步骤5：收集所有节点IP信息、节点耗时，并整理下载的文件
+      # 解析每个节点的 SUCCESS/FAILED 状态并统计成败（参考新闻爬虫工作流）
       # ----------------------------------------------------------
       - name: 收集所有IP信息并整理文件
         id: collect_ips
@@ -273,9 +292,11 @@ jobs:
           IP_TABLE_HTML=""    # HTML格式的IP表格（用于邮件）
           IP_TABLE_MD=""      # Markdown格式的IP表格（用于Release）
           counter=1           # 文件计数器
-          total_size=0        # 总文件大小（KB）
+          total_size=0        # 总文件大小（KB，仅统计成功项）
           total_node_duration=0  # 所有节点耗时总和（秒），用于参考
           max_node_duration=0    # 最长节点耗时（秒），用于估算并行总时间
+          success=0           # 成功下载数
+          failed=0            # 失败下载数
 
           # 构建Markdown表格头
           IP_TABLE_MD="| 序号 | 文件名 | 描述 | 下载节点IP | 文件大小 | 节点耗时 | 状态 |\n"
@@ -290,7 +311,7 @@ jobs:
           # 遍历所有Artifact子目录
           for artifact_dir in artifacts/file-*/; do
             if [ -d "$artifact_dir" ]; then
-              # 移动zip文件到日期目录
+              # 移动zip文件到日期目录（失败节点无 zip，自动跳过）
               for zip_file in "$artifact_dir"*.zip; do
                 if [ -f "$zip_file" ]; then
                   filename=$(basename "$zip_file")
@@ -301,22 +322,38 @@ jobs:
 
               # 读取该节点的IP信息文件
               if [ -f "$artifact_dir/ip_info.txt" ]; then
-                # 解析IP信息（格式：文件名|描述|IP|大小|SHA256|节点耗时）
-                IFS='|' read -r filename desc ip size sha256 node_duration < "$artifact_dir/ip_info.txt"
+                # 解析IP信息（格式：文件名|描述|状态|IP|大小|SHA256|节点耗时）
+                IFS='|' read -r filename desc status ip size sha256 node_duration < "$artifact_dir/ip_info.txt"
 
                 # 提取节点耗时数字（去掉"秒"字）
                 node_sec=$(echo "$node_duration" | sed 's/秒//')
 
+                # 统计成功/失败数量
+                if [ "$status" = "SUCCESS" ]; then
+                  success=$((success + 1))
+                else
+                  failed=$((failed + 1))
+                fi
+
                 # 格式化序号（01, 02, ...）
                 counter_str=$(printf "%2d" $counter)
-                echo "[$counter_str/13] $filename ($desc)"
+                echo "[$counter_str/13] $filename ($desc) -> $status"
                 echo "          IP: $ip | 大小: $size | 节点耗时: $node_duration"
 
+                # 状态徽章
+                if [ "$status" = "SUCCESS" ]; then
+                  status_cn="✅ 成功"
+                  badge_html="<span class=\"success-badge\">✅ 成功</span>"
+                else
+                  status_cn="❌ 失败"
+                  badge_html="<span class=\"fail-badge\">❌ 失败</span>"
+                fi
+
                 # 构建Markdown表格行
-                IP_TABLE_MD="${IP_TABLE_MD}| $counter | $filename | $desc | $ip | $size | $node_duration | ✅ 成功 |\n"
+                IP_TABLE_MD="${IP_TABLE_MD}| $counter | $filename | $desc | $ip | $size | $node_duration | $status_cn |\n"
 
                 # 构建HTML表格行（用于邮件通知）
-                IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td>$counter</td><td>$filename</td><td>$desc</td><td class=\"ip-highlight\">$ip</td><td>$size</td><td>$node_duration</td><td><span class=\"success-badge\">✅ 成功</span></td></tr>\n"
+                IP_TABLE_HTML="${IP_TABLE_HTML}<tr><td>$counter</td><td>$filename</td><td>$desc</td><td class=\"ip-highlight\">$ip</td><td>$size</td><td>$node_duration</td><td>$badge_html</td></tr>\n"
 
                 # 构建逗号分隔的IP列表
                 if [ -n "$IP_LIST" ]; then
@@ -325,9 +362,11 @@ jobs:
                   IP_LIST="${ip}"
                 fi
 
-                # 累加文件大小
-                size_num=$(echo "$size" | sed 's/KB//')
-                total_size=$((total_size + size_num))
+                # 累加文件大小（仅成功项参与大小统计，失败行大小为 "-" 不可参与算术）
+                if [ "$status" = "SUCCESS" ]; then
+                  size_num=$(echo "$size" | sed 's/KB//')
+                  total_size=$((total_size + size_num))
+                fi
 
                 # 累加节点耗时（用于参考）
                 total_node_duration=$((total_node_duration + node_sec))
@@ -349,6 +388,7 @@ jobs:
           total_size_mb=$(echo "scale=2; $total_size / 1024" | bc)
 
           echo "------------------------------------------------------------"
+          echo "  成功: $success | 失败: $failed | 总计: $((success + failed))"
           echo "  所有13个下载节点IP: $IP_LIST"
           echo "  总大小: ${total_size_mb}MB"
           echo "  节点耗时总和(串行参考): ${total_node_duration}秒"
@@ -362,17 +402,19 @@ jobs:
 
           # 将数据输出到GITHUB_OUTPUT，供后续步骤引用
           echo "ip_list=${IP_LIST}" >> $GITHUB_OUTPUT
+          echo "success=${success}" >> $GITHUB_OUTPUT
+          echo "failed=${failed}" >> $GITHUB_OUTPUT
           echo "total_size=${total_size_mb}MB" >> $GITHUB_OUTPUT
           echo "total_node_duration=${total_node_duration}" >> $GITHUB_OUTPUT
           echo "max_node_duration=${max_node_duration}" >> $GITHUB_OUTPUT
 
-          # 统计成功下载的文件数量
+          # 统计实际移入的zip文件数量（仅作参考）
           file_count=$(ls "$DATA_DIR"/*.zip 2>/dev/null | wc -l)
           echo "file_count=${file_count}" >> $GITHUB_OUTPUT
 
-          # 如果没有找到任何zip文件，报错退出
-          if [ "$file_count" -eq 0 ]; then
-            echo "错误：没有找到任何zip文件！"
+          # 没有任何下载结果记录时说明上游异常，报错退出（部分失败则继续发布）
+          if [ "$((success + failed))" -eq 0 ]; then
+            echo "错误：没有任何下载结果，上游可能异常！"
             exit 1
           fi
 
@@ -409,10 +451,27 @@ jobs:
       # 步骤7：将所有文件打包为一个zip文件
       # ----------------------------------------------------------
       - name: 打包数据文件
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 定义目录名和打包文件名
           DATA_DIR="${{ steps.date.outputs.date }}"
+          TAG="v${DATA_DIR}"
+
+          # 默认名；若 Release 中已存在同名 asset（同一天重跑），则自动递增 -1 / -2 / -3
+          # 避免 softprops/action-gh-release 在覆盖上传 zip 时的 already_exists 竞态
           ZIP_NAME="${DATA_DIR}.zip"
+          EXISTING=""
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING=$(gh release view "$TAG" --json assets -q ".assets[].name" 2>/dev/null || true)
+          fi
+          n=1
+          while printf '%s\n' "$EXISTING" | grep -qx "$ZIP_NAME"; do
+            ZIP_NAME="${DATA_DIR}-${n}.zip"
+            n=$((n + 1))
+          done
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+          echo "最终 zip 名（撞名自动递增）: $ZIP_NAME"
 
           # 进入数据目录，打包所有文件
           # -0 参数表示仅存储不压缩（zip文件本身已压缩）
@@ -496,6 +555,7 @@ jobs:
           | **结束时间** | ${{ steps.run_time.outputs.end_time }} (北京时间) |
           | **总运行耗时** | ${{ steps.run_time.outputs.duration }} |
           | **下载模式** | 🌐 多IP并行（13个独立IP） |
+          | **成功 / 失败** | ${{ steps.collect_ips.outputs.success }} / ${{ steps.collect_ips.outputs.failed }} |
           | **汇总IP** | ${{ env.MERGE_IP }} |
           | **总大小** | ${{ steps.collect_ips.outputs.total_size }} |
           | **节点耗时总和(串行)** | ${{ steps.collect_ips.outputs.total_node_duration }}秒 |
@@ -529,7 +589,7 @@ jobs:
           ### 📥 使用方法
           **1. 下载数据包:**
           \`\`\`bash
-          wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.date.outputs.date }}/${{ steps.date.outputs.date }}.zip
+          wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.date.outputs.date }}/${ZIP_NAME}
           \`\`\`
 
           **2. 验证文件完整性:**
@@ -539,7 +599,7 @@ jobs:
 
           **3. 解压数据:**
           \`\`\`bash
-          unzip ${{ steps.date.outputs.date }}.zip -d ${{ steps.date.outputs.date }}
+          unzip ${ZIP_NAME} -d ${{ steps.date.outputs.date }}
           \`\`\`
 
           ---
@@ -550,7 +610,7 @@ jobs:
       # 步骤11：创建GitHub Release并上传文件
       # ----------------------------------------------------------
       - name: 创建 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # Release标签名（使用日期作为版本号）
           tag_name: v${{ steps.date.outputs.date }}
@@ -558,9 +618,11 @@ jobs:
           name: 通达信数据 - ${{ steps.date.outputs.date }}
           # 使用文件内容作为Release说明（避免YAML多行问题）
           body_path: release_body.md
+          # 同一天重跑时覆盖同名 asset（zip 已在打包步骤自动递增规避冲突）
+          overwrite_files: true
           # 要上传到Release的文件列表
           files: |
-            ${{ steps.date.outputs.date }}.zip
+            ${{ env.ZIP_NAME }}
             ${{ steps.date.outputs.date }}/SHA256SUMS.txt
           # 设置为正式发布（非草稿）
           draft: false
@@ -583,8 +645,8 @@ jobs:
           server_port: ${{ env.MAIL_PORT }}
           username: ${{ env.MAIL_USERNAME }}
           password: ${{ env.MAIL_PASSWORD }}
-          # 邮件主题（包含日期和运行时间）
-          subject: 📊 通达信数据下载完成 - ${{ steps.date.outputs.date }} (耗时${{ steps.run_time.outputs.duration }})
+          # 邮件主题（包含日期、运行时间和成功/失败统计）
+          subject: 📊 通达信数据下载完成 - ${{ steps.date.outputs.date }} (耗时${{ steps.run_time.outputs.duration }} / 成功${{ steps.collect_ips.outputs.success }} 失败${{ steps.collect_ips.outputs.failed }})
           # 邮件接收人
           to: ${{ env.MAIL_TO }}
           # 发件人名称
@@ -619,6 +681,8 @@ jobs:
               .ip-highlight { color: #667eea; font-weight: bold; font-family: monospace; }
               /* 成功标签 */
               .success-badge { background: #4caf50; color: white; padding: 3px 8px; border-radius: 3px; font-size: 12px; }
+              /* 失败标签 */
+              .fail-badge { background: #f44336; color: white; padding: 3px 8px; border-radius: 3px; font-size: 12px; }
               /* 页脚 */
               .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; border-top: 1px solid #eee; }
               /* 统计卡片 */
@@ -652,6 +716,10 @@ jobs:
                   <div class="stat-value">${{ steps.collect_ips.outputs.total_size }}</div>
                   <div class="stat-label">总大小</div>
                 </div>
+                <div class="stat-item">
+                  <div class="stat-value">${{ steps.collect_ips.outputs.success }}/${{ steps.collect_ips.outputs.failed }}</div>
+                  <div class="stat-label">成功 / 失败</div>
+                </div>
               </div>
 
               <!-- 时间说明 -->
@@ -668,6 +736,7 @@ jobs:
                   <tr><td>结束时间</td><td>${{ steps.run_time.outputs.end_time }} (北京时间)</td></tr>
                   <tr><td>总运行耗时</td><td><strong>${{ steps.run_time.outputs.duration }}</strong></td></tr>
                   <tr><td>下载模式</td><td>🌐 多IP并行（13个独立IP）</td></tr>
+                  <tr><td>成功 / 失败</td><td>${{ steps.collect_ips.outputs.success }} / ${{ steps.collect_ips.outputs.failed }}</td></tr>
                   <tr><td>汇总服务器IP</td><td class="ip-highlight">${{ env.MERGE_IP }}</td></tr>
                   <tr><td>所有节点IP</td><td class="ip-highlight">${{ steps.collect_ips.outputs.ip_list }}</td></tr>
                   <tr><td>节点耗时总和(串行)</td><td>${{ steps.collect_ips.outputs.total_node_duration }}秒</td></tr>
@@ -723,6 +792,7 @@ jobs:
 
           日期: ${{ steps.date.outputs.date }}
           总运行耗时: ${{ steps.run_time.outputs.duration }}
+          成功/失败: ${{ steps.collect_ips.outputs.success }} / ${{ steps.collect_ips.outputs.failed }}
           总大小: ${{ steps.collect_ips.outputs.total_size }}
           最长节点耗时: ${{ steps.collect_ips.outputs.max_node_duration }}秒
 
